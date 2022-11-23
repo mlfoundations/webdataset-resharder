@@ -213,6 +213,7 @@ def copy_worker(
     subset_file: Path,
     shard_format: str = parser.get_default("shard_format"),
     shard_size: int = parser.get_default("shard_size"),
+    shuffle_bufsize: int = parser.get_default("shuffle_bufsize"),
     **_,
 ):
     # print(task.worker_id, task.shards[0], task.shards[-1])
@@ -266,7 +267,6 @@ def copy_worker(
                 with lock:
                     bar.update(1000)
 
-    shuffle_bufsize = 100000
     it = subset_iter()
     if shuffle_bufsize > 0:
         it = wds.filters._shuffle(it, shuffle_bufsize, shuffle_bufsize)
