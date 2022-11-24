@@ -1,19 +1,19 @@
 import time
-from pathlib import Path
-import webdataset as wds
 import multiprocessing as mp
-import queue
-import tqdm
-import numpy as np
-from dataclasses import dataclass
-from typing import List, Dict, Any
 import shutil
 import json
-import uuid
 import os
 import contextlib
 import argparse
+
+from pathlib import Path
+from dataclasses import dataclass
+from typing import List
+
+import numpy as np
+import tqdm
 import simdjson
+import webdataset as wds
 
 
 @dataclass
@@ -252,7 +252,7 @@ def copy_worker(
         nonlocal output_count
 
         for i, d in enumerate(ds):
-            key_str = simdjson.Parser().parse(d['json']).get("uid")
+            key_str = simdjson.Parser().parse(d["json"]).get("uid")
             key_u16 = np.array([(int(key_str[:16], 16), int(key_str[16:32], 16))], u16)[
                 0
             ]
@@ -336,8 +336,7 @@ def main(args):
     state = do_tasks(worker_tasks, vars(args))
     elapsed_time = time.perf_counter() - start_time
 
-    # TODO: why do I need to do this to avoid corrupting the next print?
-    time.sleep(0.2)
+    print()
 
     postprocess_output(**vars(args))
 
