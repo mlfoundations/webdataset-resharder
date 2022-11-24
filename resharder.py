@@ -7,6 +7,7 @@ import json
 import os
 import contextlib
 import argparse
+import bisect
 
 from pathlib import Path
 from dataclasses import dataclass
@@ -111,6 +112,38 @@ def make_argparser():
 parser = make_argparser()
 
 
+def guess_num_shards(
+    *,
+    input_dir: Path,
+    first_shard: int = parser.get_default("first_shard"),
+    shard_format: str = parser.get_default("shard_format"),
+    shard_stats_format: str = parser.get_default("shard_stats_format"),
+    **_,
+):
+    n = 1
+
+    def test_size(i):
+        shard = input_dir / shard_format.format(first_shard + i)
+        shard_stats = input_dir / shard_stats_format.format(first_shard + i)
+        return shard.exists() and shard_stats.exists()
+
+    for _ in range(40):
+        if not test_size(n):
+            break
+        n *= 2
+    else:
+        raise RuntimeError(f"Found too many shards (at least {n})")
+
+    if n == 1:
+        raise RuntimeError("Did not find any shards")
+
+    n = n // 2 + bisect.bisect_right(
+        range(n // 2, n), False, key=lambda i: not test_size(i)
+    )
+
+    return n
+
+
 def load_shard_metadata(
     *,
     input_dir: Path,
@@ -133,8 +166,12 @@ def load_shard_metadata(
             print(f"shard table has size {len(table)}")
 
     if not num_shards and not table:
-        # TODO can guess number of shards from the filenames
-        parser.error("Must either supply valid --shard-table or --num-shards")
+        num_shards = guess_num_shards(
+            input_dir=input_dir,
+            first_shard=first_shard,
+            shard_format=shard_format,
+            shard_stats_format=shard_stats_format,
+        )
 
     if not num_shards:
         num_shards = len(table) - first_shard
