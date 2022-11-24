@@ -13,6 +13,7 @@ import uuid
 import os
 import contextlib
 import argparse
+import simdjson
 
 
 @dataclass
@@ -83,15 +84,15 @@ def make_argparser():
     )
     parser.add_argument(
         "--shard-format",
-        default="shard_{:06d}.tar",
+        default="{:05d}.tar",
         type=str,
         help="format for each shard in str.format syntax",
     )
     parser.add_argument(
-        "--shard-size-format",
-        default="shard_{:06d}_size.txt",
+        "--shard-stats-format",
+        default="{:05d}_stats.json",
         type=str,
-        help="format for each shard size file in str.format syntax",
+        help="format for each shard stats file in str.format syntax",
     )
     parser.add_argument(
         "--shard-table",
@@ -114,7 +115,7 @@ def load_shard_metadata(
     num_shards: int = parser.get_default("num_shards"),
     first_shard: int = parser.get_default("first_shard"),
     shard_format: str = parser.get_default("shard_format"),
-    shard_size_format: str = parser.get_default("shard_size_format"),
+    shard_stats_format: str = parser.get_default("shard_stats_format"),
     shard_table: Path = parser.get_default("shard_table"),
     **_,
 ):
@@ -129,13 +130,17 @@ def load_shard_metadata(
             table = json.load(f)
             print(f"shard table has size {len(table)}")
 
+    if not num_shards and not table:
+        # TODO can guess number of shards from the filenames
+        parser.error("Must either supply valid --shard-table or --num-shards")
+
     if not num_shards:
         num_shards = len(table) - first_shard
 
     shard_ids = range(first_shard, first_shard + num_shards)
 
     for shard_id in tqdm.tqdm(shard_ids):
-        size_path = input_dir / shard_size_format.format(shard_id)
+        size_path = input_dir / shard_stats_format.format(shard_id)
         shard_name = shard_format.format(shard_id)
         shard_path = input_dir / shard_name
 
@@ -145,8 +150,7 @@ def load_shard_metadata(
             offset += size
 
         elif size_path.exists() and shard_path.exists():
-            with open(size_path) as f:
-                size = int(f.read().strip())
+            size = int(simdjson.Parser().load(size_path).get("successes"))
             shards.append(Shard(shard_id, offset, size))
             offset += size
 
@@ -248,7 +252,7 @@ def copy_worker(
         nonlocal output_count
 
         for i, d in enumerate(ds):
-            key_str = d["__key__"]
+            key_str = simdjson.Parser().parse(d['json']).get("uid")
             key_u16 = np.array([(int(key_str[:16], 16), int(key_str[16:32], 16))], u16)[
                 0
             ]
