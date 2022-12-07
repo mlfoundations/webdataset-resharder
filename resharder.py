@@ -298,7 +298,7 @@ def copy_worker(
 
             a = np.searchsorted(subset, key_u16, "left")
             b = np.searchsorted(subset, key_u16, "right")
-            count = a - b
+            count = b - a
 
             for j in range(count):
                 yield {**d, "__key__": f"{key_str}-{j}"}
