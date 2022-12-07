@@ -363,6 +363,8 @@ def postprocess_output(*, output_dir, shard_format, **_):
 
 def main(args):
     shards, total_data = load_shard_metadata(**vars(args))
+    if len(shards) < args.num_workers:
+        args.num_workers = len(shards)
 
     subset = load_subset(**vars(args))
     print(f"selecting a subset of {len(subset)} examples")
