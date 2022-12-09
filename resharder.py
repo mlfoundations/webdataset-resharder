@@ -127,15 +127,15 @@ def guess_num_shards(
         shard_stats = input_dir / shard_stats_format.format(first_shard + i)
         return shard.exists() and shard_stats.exists()
 
+    if not test_size(0):
+        raise RuntimeError("Did not find any shards")
+
     for _ in range(40):
         if not test_size(n):
             break
         n *= 2
     else:
         raise RuntimeError(f"Found too many shards (at least {n})")
-
-    if n == 1:
-        raise RuntimeError("Did not find any shards")
 
     n = n // 2 + bisect.bisect_right(
         range(n // 2, n), False, key=lambda i: not test_size(i)
@@ -298,7 +298,7 @@ def copy_worker(
 
             a = np.searchsorted(subset, key_u16, "left")
             b = np.searchsorted(subset, key_u16, "right")
-            count = a - b
+            count = b - a
 
             for j in range(count):
                 yield {**d, "__key__": f"{key_str}-{j}"}
@@ -363,6 +363,8 @@ def postprocess_output(*, output_dir, shard_format, **_):
 
 def main(args):
     shards, total_data = load_shard_metadata(**vars(args))
+    if len(shards) < args.num_workers:
+        args.num_workers = len(shards)
 
     subset = load_subset(**vars(args))
     print(f"selecting a subset of {len(subset)} examples")
