@@ -156,6 +156,7 @@ def load_shard_metadata(
 ):
     shards = []
     offset = 0
+    parser = simdjson.Parser()
 
     table = {}
     shard_table_path = input_dir / shard_table
@@ -189,7 +190,7 @@ def load_shard_metadata(
             offset += size
 
         elif size_path.exists() and shard_path.exists():
-            size = int(simdjson.Parser().load(size_path).get("successes"))
+            size = int(parser.load(size_path).get("successes"))
             shards.append(Shard(shard_id, offset, size))
             offset += size
 
@@ -289,9 +290,10 @@ def copy_worker(
     def subset_iter():
         nonlocal processed_count
         nonlocal output_count
+        parser = simdjson.Parser()
 
         for i, d in enumerate(ds):
-            key_str = simdjson.Parser().parse(d["json"]).get("uid")
+            key_str = parser.parse(d["json"]).get("uid")
             key_u16 = np.array([(int(key_str[:16], 16), int(key_str[16:32], 16))], u16)[
                 0
             ]
