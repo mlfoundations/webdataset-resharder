@@ -201,7 +201,7 @@ def load_shard_metadata(
 
 def load_subset(*, subset_file: Path, **_):
     # Detect the NumPy format magic string
-    if True or open(subset_file, "rb").read(6) == b"\x93NUMPY":
+    if open(subset_file, "rb").read(6) == b"\x93NUMPY":
         subset = np.load(subset_file, mmap_mode="r")
         assert subset.dtype == u16
 
