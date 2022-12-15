@@ -268,7 +268,7 @@ def copy_worker(
     # disgusting hack to prevent ShardWriter from printing
     with open(os.devnull, "w") as f, contextlib.redirect_stdout(f):
         sw = wds.ShardWriter(
-            str(output_dir / f"shard_{task.worker_id}_%06d.tar"),
+            str(output_dir / f"shard_{task.worker_id:04d}_%07d.tar"),
             maxcount=shard_size,
         )
     sw.verbose = False
@@ -379,7 +379,7 @@ def main(args):
 
     print()
 
-    postprocess_output(**vars(args))
+    # postprocess_output(**vars(args))
 
     print(
         f"processed {total_data} images in {elapsed_time:.3f}s ({total_data/elapsed_time:.2f} images/sec)"
