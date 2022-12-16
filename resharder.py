@@ -492,6 +492,7 @@ def rmtree_contents(path: Path):
         if path.is_file():
             path.unlink()
         elif path.is_dir():
+            # TODO: won't work on S3
             shutil.rmtree(path)
 
 
@@ -506,24 +507,26 @@ def main(args):
     if len(shards) < args.num_workers:
         args.num_workers = len(shards)
 
-    subset = load_subset(**vars(args))
-    print(f"selecting a subset of {len(subset)} examples")
+    with tempfile.NamedTemporaryFile("wb") as f:
+        with args.subset_file.open("rb") as sf:
+            f.write(sf.read())
+        args.subset_file = f.name
 
-    worker_tasks = plan_tasks(shards, **vars(args))
+        subset = load_subset(**vars(args))
+        print(f"selecting a subset of {len(subset)} examples")
 
-    rmtree_contents(args.output_dir)
+        worker_tasks = plan_tasks(shards, **vars(args))
 
-    start_time = time.perf_counter()
-    state = do_tasks(worker_tasks, vars(args))
-    elapsed_time = time.perf_counter() - start_time
+        rmtree_contents(args.output_dir)
 
-    print()
+        start_time = time.perf_counter()
+        state = do_tasks(worker_tasks, vars(args))
+        elapsed_time = time.perf_counter() - start_time
 
-    # postprocess_output(**vars(args))
-
-    print(
-        f"processed {total_data} images in {elapsed_time:.3f}s ({total_data/elapsed_time:.2f} images/sec)"
-    )
+        print()
+        print(
+            f"processed {total_data} images in {elapsed_time:.3f}s ({total_data/elapsed_time:.2f} images/sec)"
+        )
 
 
 if __name__ == "__main__":
