@@ -14,12 +14,14 @@ import tempfile
 from pathlib import Path
 from cloudpathlib import CloudPath
 from dataclasses import dataclass
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Union
 
 import numpy as np
 import tqdm
 import simdjson
 import webdataset as wds
+
+Pathy = Union[Path, CloudPath]
 
 # Monkey-patch webdataset to support S3 via aws s3
 
@@ -174,7 +176,7 @@ def ceildiv(a, b):
     return -(-a // b)
 
 
-def path_or_cloudpath(s):
+def path_or_cloudpath(s: str) -> Pathy:
     if re.match(r"^\w+://", s):
         return CloudPath(s)
     return Path(s)
@@ -192,7 +194,11 @@ def make_argparser():
         help="input directory containing a webdataset",
     )
     parser.add_argument(
-        "-o", "--output-dir", type=Path, required=True, help="output directory"
+        "-o",
+        "--output-dir",
+        type=path_or_cloudpath,
+        required=True,
+        help="output directory",
     )
     parser.add_argument(
         "-s",
@@ -255,7 +261,7 @@ parser = make_argparser()
 
 def guess_num_shards(
     *,
-    input_dir: Path,
+    input_dir: Pathy,
     first_shard: int = parser.get_default("first_shard"),
     shard_format: str = parser.get_default("shard_format"),
     shard_stats_format: str = parser.get_default("shard_stats_format"),
@@ -287,12 +293,12 @@ def guess_num_shards(
 
 def load_shard_metadata(
     *,
-    input_dir: Path,
+    input_dir: Pathy,
     num_shards: int = parser.get_default("num_shards"),
     first_shard: int = parser.get_default("first_shard"),
     shard_format: str = parser.get_default("shard_format"),
     shard_stats_format: str = parser.get_default("shard_stats_format"),
-    shard_table: Path = parser.get_default("shard_table"),
+    shard_table: Pathy = parser.get_default("shard_table"),
     **_,
 ):
     shards = []
@@ -343,6 +349,8 @@ def load_shard_metadata(
 
 
 def load_subset(*, subset_file: Path, **_):
+    assert not isinstance(subset_file, CloudPath)
+
     # Detect the NumPy format magic string
     if open(subset_file, "rb").read(6) == b"\x93NUMPY":
         subset = np.load(subset_file, mmap_mode="r")
@@ -396,8 +404,8 @@ def copy_worker(
     lock,
     task: WorkerTask,
     *,
-    input_dir: Path,
-    output_dir: Path,
+    input_dir: Pathy,
+    output_dir: Pathy,
     subset_file: Path,
     shard_format: str = parser.get_default("shard_format"),
     shard_size: int = parser.get_default("shard_size"),
@@ -439,6 +447,7 @@ def copy_worker(
 
         for i, d in enumerate(ds):
             key_str = parser.parse(d["json"]).get("uid")
+            # TODO: is this really the best way to get a u16 scalar?
             key_u16 = np.array([(int(key_str[:16], 16), int(key_str[16:32], 16))], u16)[
                 0
             ]
@@ -494,7 +503,7 @@ def do_tasks(worker_tasks, args):
     return state
 
 
-def rmtree_contents(path: Path):
+def rmtree_contents(path: Pathy):
     for path in path.iterdir():
         if path.is_file():
             path.unlink()
