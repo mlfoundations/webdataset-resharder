@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import time
+import re
 import multiprocessing as mp
 import shutil
 import json
@@ -10,13 +11,141 @@ import argparse
 import bisect
 
 from pathlib import Path
+from cloudpathlib import CloudPath
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional, Callable
 
 import numpy as np
 import tqdm
 import simdjson
 import webdataset as wds
+
+# Monkey-patch webdataset to support S3 via aws s3
+
+def gopen_aws(url, mode="rb", bufsize=8192):
+    """Open a URL with `aws s3`.
+    :param url: url (usually, s3:// etc.)
+    :param mode: file mode
+    :param bufsize: buffer size
+    """
+    # TODO not sure about ignore_status
+    if mode[0] == "r":
+        cmd = f"aws s3 cp '{url}' -"
+        return Pipe(
+            cmd,
+            mode=mode,
+            shell=True,
+            bufsize=bufsize,
+            ignore_status=[141, 23],
+        )
+    elif mode[0] == "w":
+        cmd = f"aws s3 cp - '{url}'"
+        return Pipe(
+            cmd,
+            mode=mode,
+            shell=True,
+            bufsize=bufsize,
+            ignore_status=[141, 26],
+        )
+    else:
+        raise ValueError(f"{mode}: unknown mode")
+
+wds.gopen_schemes.setdefault('s3', gopen_aws)
+
+
+class ShardWriter:
+    """Like TarWriter but splits into multiple shards."""
+
+    def __init__(
+        self,
+        pattern: str,
+        maxcount: int = 100000,
+        maxsize: float = 3e9,
+        post: Optional[Callable] = None,
+        start_shard: int = 0,
+        **kw,
+    ):
+        """Create a ShardWriter.
+        :param pattern: output file pattern
+        :param maxcount: maximum number of records per shard (Default value = 100000)
+        :param maxsize: maximum size of each shard (Default value = 3e9)
+        :param kw: other options passed to TarWriter
+        """
+        self.verbose = 1
+        self.kw = kw
+        self.maxcount = maxcount
+        self.maxsize = maxsize
+        self.post = post
+
+        self.tarstream = None
+        self.shard = start_shard
+        self.pattern = pattern
+        self.total = 0
+        self.count = 0
+        self.size = 0
+        self.fname = None
+        self.stream = None
+        self.next_stream()
+
+    def next_stream(self):
+        """Close the current stream and move to the next."""
+        self.finish()
+        self.fname = self.pattern % self.shard
+        # if self.verbose:
+        #     print(
+        #         "# writing",
+        #         self.fname,
+        #         self.count,
+        #         "%.1f GB" % (self.size / 1e9),
+        #         self.total,
+        #     )
+
+        self.shard += 1
+
+        self.stream = None
+        self.tarstream = wds.TarWriter(self.fname, **self.kw)
+
+        self.count = 0
+        self.size = 0
+
+    def write(self, obj):
+        """Write a sample.
+        :param obj: sample to be written
+        """
+        if self.tarstream is None or self.count >= self.maxcount or self.size >= self.maxsize:
+            self.next_stream()
+        size = self.tarstream.write(obj)
+        self.count += 1
+        self.total += 1
+        self.size += size
+
+    def finish(self):
+        """Finish all writing (use close instead)."""
+        if self.tarstream is not None:
+            self.tarstream.close()
+            assert self.fname is not None
+            if callable(self.post):
+                self.post(self.fname)
+            self.tarstream = None
+        if self.stream is not None:
+            self.stream.close()
+
+    def close(self):
+        """Close the stream."""
+        self.finish()
+        del self.tarstream
+        del self.shard
+        del self.count
+        del self.size
+
+    def __enter__(self):
+        """Enter context."""
+        return self
+
+    def __exit__(self, *args, **kw):
+        """Exit context."""
+        self.close()
+
 
 
 @dataclass
@@ -39,6 +168,11 @@ def ceildiv(a, b):
     return -(-a // b)
 
 
+def path_or_cloudpath(s):
+    if re.match(r"^\w+://", s):
+        return CloudPath(s)
+    return Path(s)
+
 def make_argparser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -46,7 +180,7 @@ def make_argparser():
     parser.add_argument(
         "-i",
         "--input-dir",
-        type=Path,
+        type=path_or_cloudpath,
         required=True,
         help="input directory containing a webdataset",
     )
@@ -56,7 +190,7 @@ def make_argparser():
     parser.add_argument(
         "-s",
         "--subset-file",
-        type=Path,
+        type=path_or_cloudpath,
         required=True,
         help="subset file, either a NumPy or memmap array of 128 bit hashes",
     )
@@ -100,7 +234,7 @@ def make_argparser():
     parser.add_argument(
         "--shard-table",
         default="sizes.json",
-        type=Path,
+        type=path_or_cloudpath,
         help="JSON file recording input shard sizes relative to INPUT_DIR",
     )
     parser.add_argument(
@@ -190,7 +324,8 @@ def load_shard_metadata(
             offset += size
 
         elif size_path.exists() and shard_path.exists():
-            size = int(parser.load(size_path).get("successes"))
+            with size_path.open("r") as f:
+                size = int(simdjson.Parser().parse(f.read()).get("successes"))
             shards.append(Shard(shard_id, offset, size))
             offset += size
 
@@ -267,11 +402,12 @@ def copy_worker(
         [str(input_dir / shard_format.format(shard.shard_id)) for shard in task.shards]
     )
     # disgusting hack to prevent ShardWriter from printing
-    with open(os.devnull, "w") as f, contextlib.redirect_stdout(f):
-        sw = wds.ShardWriter(
-            str(output_dir / f"shard_{task.worker_id:04d}_%07d.tar"),
-            maxcount=shard_size,
-        )
+    # with open(os.devnull, "w") as f, contextlib.redirect_stdout(f):
+    sw = ShardWriter(
+        str(output_dir / f"shard_{task.worker_id:04d}_%07d.tar"),
+        maxcount=shard_size,
+    )
+
     sw.verbose = False
 
     total_data = (
