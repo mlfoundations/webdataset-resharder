@@ -23,6 +23,7 @@ import webdataset as wds
 
 # Monkey-patch webdataset to support S3 via aws s3
 
+
 def gopen_aws(url, mode="rb", bufsize=8192):
     """Open a URL with `aws s3`.
     :param url: url (usually, s3:// etc.)
@@ -51,7 +52,8 @@ def gopen_aws(url, mode="rb", bufsize=8192):
     else:
         raise ValueError(f"{mode}: unknown mode")
 
-wds.gopen_schemes.setdefault('s3', gopen_aws)
+
+wds.gopen_schemes.setdefault("s3", gopen_aws)
 
 
 class ShardWriter:
@@ -113,7 +115,11 @@ class ShardWriter:
         """Write a sample.
         :param obj: sample to be written
         """
-        if self.tarstream is None or self.count >= self.maxcount or self.size >= self.maxsize:
+        if (
+            self.tarstream is None
+            or self.count >= self.maxcount
+            or self.size >= self.maxsize
+        ):
             self.next_stream()
         size = self.tarstream.write(obj)
         self.count += 1
@@ -148,7 +154,6 @@ class ShardWriter:
         self.close()
 
 
-
 @dataclass
 class Shard:
     shard_id: int
@@ -173,6 +178,7 @@ def path_or_cloudpath(s):
     if re.match(r"^\w+://", s):
         return CloudPath(s)
     return Path(s)
+
 
 def make_argparser():
     parser = argparse.ArgumentParser(
@@ -509,9 +515,10 @@ def main(args):
         args.num_workers = len(shards)
 
     with tempfile.NamedTemporaryFile("wb") as f:
-        with args.subset_file.open("rb") as sf:
-            f.write(sf.read())
-        args.subset_file = f.name
+        if isinstance(args.subset_file, CloudPath):
+            with args.subset_file.open("rb") as sf:
+                f.write(sf.read())
+            args.subset_file = Path(f.name)
 
         subset = load_subset(**vars(args))
         print(f"selecting a subset of {len(subset)} examples")
