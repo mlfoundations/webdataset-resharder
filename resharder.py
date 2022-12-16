@@ -364,6 +364,8 @@ def plan_tasks(shards: List[Shard], /, **args):
     for worker_id, (shard_start, shard_end) in enumerate(
         zip(shard_chunks, shard_chunks[1:])
     ):
+        if shard_start == shard_end:
+            continue
         first_shard, last_shard = shards[shard_start], shards[shard_end - 1]
 
         first_index = first_shard.data_start
