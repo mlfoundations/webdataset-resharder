@@ -9,6 +9,7 @@ import os
 import contextlib
 import argparse
 import bisect
+import tempfile
 
 from pathlib import Path
 from cloudpathlib import CloudPath
@@ -19,6 +20,7 @@ import numpy as np
 import tqdm
 import simdjson
 import webdataset as wds
+Pipe = wds.writer.gopen.Pipe
 
 # Monkey-patch webdataset to support S3 via aws s3
 
@@ -185,7 +187,7 @@ def make_argparser():
         help="input directory containing a webdataset",
     )
     parser.add_argument(
-        "-o", "--output-dir", type=Path, required=True, help="output directory"
+        "-o", "--output-dir", type=path_or_cloudpath, required=True, help="output directory"
     )
     parser.add_argument(
         "-s",
