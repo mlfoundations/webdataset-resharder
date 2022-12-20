@@ -293,6 +293,18 @@ def guess_num_shards(
     return n
 
 
+def load_shard_size(args):
+    shard_id, input_dir, shard_format, shard_stats_format = args
+    size_path = input_dir / shard_stats_format.format(shard_id)
+    shard_name = shard_format.format(shard_id)
+    shard_path = input_dir / shard_name
+    size = None
+    if size_path.exists() and shard_path.exists():
+        with size_path.open("r") as f:
+            size = int(simdjson.Parser().parse(f.read()).get("successes"))
+    return shard_name, size
+
+
 def load_shard_metadata(
     *,
     input_dir: Pathy,
@@ -301,6 +313,7 @@ def load_shard_metadata(
     shard_format: str = parser.get_default("shard_format"),
     shard_stats_format: str = parser.get_default("shard_stats_format"),
     shard_table: Pathy = parser.get_default("shard_table"),
+    num_workers: int = parser.get_default("num_workers"),
     **_,
 ):
     shards = []
@@ -327,8 +340,26 @@ def load_shard_metadata(
         num_shards = len(table) - first_shard
 
     shard_ids = range(first_shard, first_shard + num_shards)
+    pool = mp.Pool(num_workers)
+    size_iter = pool.imap(
+        load_shard_size,
+        (
+            (
+                shard_id,
+                input_dir,
+                shard_format,
+                shard_stats_format,
+            )
+            for shard_id in tqdm.tqdm(shard_ids)
+        ),
+        chunksize=16,
+    )
 
-    for shard_id in tqdm.tqdm(shard_ids):
+    for shard_name, size in size_iter:
+        if size is not None:
+            table[shard_name] = size
+
+    for shard_id in shard_ids:
         size_path = input_dir / shard_stats_format.format(shard_id)
         shard_name = shard_format.format(shard_id)
         shard_path = input_dir / shard_name
@@ -337,12 +368,8 @@ def load_shard_metadata(
             size = table[shard_name]
             shards.append(Shard(shard_id, offset, size))
             offset += size
-
-        elif size_path.exists() and shard_path.exists():
-            with size_path.open("r") as f:
-                size = int(simdjson.Parser().parse(f.read()).get("successes"))
-            shards.append(Shard(shard_id, offset, size))
-            offset += size
+        else:
+            print(f"missing shard {shard_name}")
 
     total_data = shards[-1].data_start + shards[-1].size
     print(f"found a total of {len(shards)} shards with {total_data} examples")
