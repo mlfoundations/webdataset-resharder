@@ -4,7 +4,6 @@ import time
 import re
 import multiprocessing as mp
 import shutil
-import json
 import os
 import contextlib
 import argparse
@@ -331,7 +330,10 @@ def load_shard_metadata(
     if shard_table_path.exists():
         print(f"loading shard table {shard_table_path}")
         with open(shard_table_path, "rb") as f:
-            table = json.load(f)
+            try:
+                table = simdjson.load(f)
+            except ValueError as e:
+                print(f"shard table parsing error: {e.args[0]}")
             print(f"shard table has size {len(table)}")
 
     if not num_shards and not table:
