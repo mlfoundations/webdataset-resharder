@@ -253,6 +253,11 @@ def make_argparser():
         help="JSON file recording input shard sizes relative to INPUT_DIR",
     )
     parser.add_argument(
+        "--write-shard-table",
+        action="store_true",
+        help="write shard table to output_dir if it does not exist",
+    )
+    parser.add_argument(
         "--shuffle-bufsize", default=100000, type=int, help="buffer size for shuffling"
     )
     return parser
@@ -313,6 +318,7 @@ def load_shard_metadata(
     shard_format: str = parser.get_default("shard_format"),
     shard_stats_format: str = parser.get_default("shard_stats_format"),
     shard_table: Pathy = parser.get_default("shard_table"),
+    write_shard_table: bool = parser.get_default("write_shard_table"),
     num_workers: int = parser.get_default("num_workers"),
     **_,
 ):
@@ -373,6 +379,11 @@ def load_shard_metadata(
 
     total_data = shards[-1].data_start + shards[-1].size
     print(f"found a total of {len(shards)} shards with {total_data} examples")
+
+    if write_shard_table and not shard_table_path.exists():
+        print("writing shard table")
+        with shard_table_path.open("w") as f:
+            simdjson.dump(table, f)
 
     return shards, total_data
 
