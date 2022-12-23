@@ -575,7 +575,11 @@ def main(args):
 
     if args.is_master:
         print('copying the subset file')
-        args.subset_file.copy(args.output_dir / 'sample_ids.npy')
+        output_filename = args.output_dir / 'sample_ids.npy'
+        if isinstance(args.subset_file, CloudPath):
+            args.subset_file.copy(output_filename)
+        else:
+            shutil.copy(output_filename)
 
     with tempfile.NamedTemporaryFile("wb") as f:
         if isinstance(args.subset_file, CloudPath):
