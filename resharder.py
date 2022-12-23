@@ -579,7 +579,7 @@ def main(args):
         if isinstance(args.subset_file, CloudPath):
             args.subset_file.copy(output_filename)
         else:
-            shutil.copy(output_filename)
+            shutil.copyfile(args.subset_file, output_filename)
 
     with tempfile.NamedTemporaryFile("wb") as f:
         if isinstance(args.subset_file, CloudPath):
