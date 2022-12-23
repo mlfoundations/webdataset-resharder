@@ -259,6 +259,12 @@ def make_argparser():
     parser.add_argument(
         "--shuffle-bufsize", default=100000, type=int, help="buffer size for shuffling"
     )
+    parser.add_argument(
+        "--is-master",
+        action="store_true",
+        default=True,
+        help="for multi-node processing, indicate whether the current script is the master",
+    )
     return parser
 
 
@@ -565,6 +571,12 @@ def main(args):
     if len(shards) < args.num_workers:
         args.num_workers = len(shards)
 
+    rmtree_contents(args.output_dir)
+
+    if args.is_master:
+        print('copying the subset file')
+        args.subset_file.copy(args.output_dir / 'sample_ids.npy')
+
     with tempfile.NamedTemporaryFile("wb") as f:
         if isinstance(args.subset_file, CloudPath):
             with args.subset_file.open("rb") as sf:
@@ -576,8 +588,7 @@ def main(args):
 
         worker_tasks = plan_tasks(shards, **vars(args))
 
-        rmtree_contents(args.output_dir)
-
+        print('starting workers...')
         start_time = time.perf_counter()
         state = do_tasks(worker_tasks, vars(args))
         elapsed_time = time.perf_counter() - start_time
