@@ -5,7 +5,6 @@ import re
 import multiprocessing as mp
 import shutil
 import os
-import contextlib
 import argparse
 import bisect
 import tempfile
@@ -91,20 +90,11 @@ class ShardWriter:
         self.size = 0
         self.fname = None
         self.stream = None
-        self.next_stream()
 
     def next_stream(self):
         """Close the current stream and move to the next."""
         self.finish()
         self.fname = self.pattern % self.shard
-        # if self.verbose:
-        #     print(
-        #         "# writing",
-        #         self.fname,
-        #         self.count,
-        #         "%.1f GB" % (self.size / 1e9),
-        #         self.total,
-        #     )
 
         self.shard += 1
 
@@ -466,8 +456,7 @@ def copy_worker(
     ds = wds.WebDataset(
         [str(input_dir / shard_format.format(shard.shard_id)) for shard in task.shards]
     )
-    # disgusting hack to prevent ShardWriter from printing
-    # with open(os.devnull, "w") as f, contextlib.redirect_stdout(f):
+
     sw = ShardWriter(
         str(output_dir / f"shard_{task.worker_id:04d}_%07d.tar"),
         maxcount=shard_size,
