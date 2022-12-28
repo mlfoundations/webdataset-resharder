@@ -597,10 +597,19 @@ def main(args):
         state = do_tasks(worker_tasks, vars(args))
         elapsed_time = time.perf_counter() - start_time
 
+        output_data = state["output_count"]
+
         print()
         print(
             f"processed {total_data} images in {elapsed_time:.3f}s ({total_data/elapsed_time:.2f} images/sec)"
         )
+
+        print(f"selected a total of {output_data} images")
+        if output_data != len(subset):
+            print("Warning: some images selected in the subset were not encountered!")
+
+        with (args.output_dir / '__len__').open('w') as f:
+            f.write(str(output_data))
 
 
 if __name__ == "__main__":
