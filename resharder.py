@@ -563,8 +563,8 @@ def main(args):
     rmtree_contents(args.output_dir)
 
     if args.is_master:
-        print('copying the subset file')
-        output_filename = args.output_dir / 'sample_ids.npy'
+        print("copying the subset file")
+        output_filename = args.output_dir / "sample_ids.npy"
         if isinstance(args.subset_file, CloudPath):
             args.subset_file.copy(output_filename)
         else:
@@ -581,24 +581,35 @@ def main(args):
 
         worker_tasks = plan_tasks(shards, **vars(args))
 
-        print('starting workers...')
+        print("starting workers...")
         start_time = time.perf_counter()
         state = do_tasks(worker_tasks, vars(args))
         elapsed_time = time.perf_counter() - start_time
 
-        output_data = state["output_count"]
+        processed_count = state["processed_count"]
+        output_count = state["output_count"]
 
         print()
         print(
             f"processed {total_data} images in {elapsed_time:.3f}s ({total_data/elapsed_time:.2f} images/sec)"
         )
 
-        print(f"selected a total of {output_data} images")
-        if output_data != len(subset):
-            print("Warning: some images selected in the subset were not encountered!")
+        print(f"output {output_count} images")
+        if output_count != len(subset):
+            print(
+                f"Warning: {len(subset) - output_count} images in the subset were not found in the input!"
+            )
 
-        with (args.output_dir / '__len__').open('w') as f:
-            f.write(str(output_data))
+        with (args.output_dir / "meta.json").open("w") as f:
+            simdjson.dump(
+                {
+                    **{k: str(v) for k, v in vars(args).items()},
+                    "processed_count": processed_count,
+                    "output_count": output_count,
+                    "cwd": str(Path.cwd()),
+                },
+                f,
+            )
 
 
 if __name__ == "__main__":
