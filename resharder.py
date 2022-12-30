@@ -546,9 +546,6 @@ def rmtree_contents(path: Pathy):
     for path in path.iterdir():
         if path.is_file():
             path.unlink()
-        elif path.is_dir():
-            # TODO: won't work on S3
-            shutil.rmtree(path)
 
 
 def postprocess_output(*, output_dir, shard_format, **_):
