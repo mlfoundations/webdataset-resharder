@@ -510,6 +510,8 @@ def copy_worker(
     for d in it:
         sw.write(d)
 
+    sw.close()
+
     with lock:
         bar.update(total_data - bar.n)
         bar.close()
