@@ -8,6 +8,7 @@ import os
 import argparse
 import bisect
 import tempfile
+import cv2
 
 from pathlib import Path
 from cloudpathlib import CloudPath
@@ -15,9 +16,12 @@ from dataclasses import dataclass
 from typing import List, Optional, Callable, Union
 
 import numpy as np
+import pandas as pd
 import tqdm
 import simdjson
 import webdataset as wds
+
+from img2dataset.blurrer import BoundingBoxBlurrer
 
 Pipe = wds.writer.gopen.Pipe
 
@@ -158,6 +162,7 @@ class Shard:
 class WorkerTask:
     worker_id: int
     shards: List[Shard]
+    parquets: Optional[List[str]]
 
 
 u16 = np.dtype("u8,u8")
@@ -254,6 +259,12 @@ def make_argparser():
         action="store_true",
         default=True,
         help="for multi-node processing, indicate whether the current script is the master",
+    )
+    parser.add_argument(
+        "--blur_metadata_map",
+        type=str,
+        default=None,
+        help="Map file from shards to parquets for blurring.",
     )
     return parser
 
@@ -406,6 +417,19 @@ def plan_tasks(shards: List[Shard], /, **args):
     worker_tasks = []
     total_data = shards[-1].data_start + shards[-1].size
 
+    # Add metadata if needed for blurring
+    if args["shard_parquets"] is not None:
+        reverse_map = {}
+        for parquet_id in args["shard_parquets"].keys():
+            for shard_file in args["shard_parquets"][parquet_id]["shards"]:
+                reverse_map[path_or_cloudpath(shard_file).name] = args["shard_parquets"][parquet_id]["parquet"]
+
+        parquets = []
+        for shard in shards:
+            parquets.append(reverse_map[args["shard_format"].format(shard.shard_id)])
+    else:
+        parquets = None
+
     # evenly distribute data to workers
     data_starts = [shard.data_start for shard in shards]
     shard_chunks = [
@@ -424,6 +448,12 @@ def plan_tasks(shards: List[Shard], /, **args):
         first_index = first_shard.data_start
         last_index = last_shard.data_start + last_shard.size - 1
 
+        if parquets is not None:
+            worker_parquets = parquets[shard_start:shard_end]
+            worker_parquets = list(np.unique(worker_parquets))
+        else:
+            worker_parquets = None
+
         print(
             f"worker {worker_id:03d} will process shards {shard_start} to {shard_end-1}"
         )
@@ -431,6 +461,7 @@ def plan_tasks(shards: List[Shard], /, **args):
             WorkerTask(
                 worker_id,
                 shards[shard_start:shard_end],
+                worker_parquets
             )
         )
 
@@ -457,6 +488,16 @@ def copy_worker(
         [str(input_dir / shard_format.format(shard.shard_id)) for shard in task.shards]
     )
 
+    # Retrieve the parquet files for this task.
+    if task.parquets is not None:
+        metadata_list = []
+        for parquet in task.parquets:
+            with path_or_cloudpath(parquet).open("rb") as f:
+                metadata_list.append(pd.read_parquet(f))
+        face_metadata = pd.concat(metadata_list, axis=0, ignore_index=True).set_index("uid")["face_bboxes"]
+    else:
+        face_metadata = None
+    
     sw = ShardWriter(
         str(output_dir / f"shard_{task.worker_id:04d}_%07d.tar"),
         maxcount=shard_size,
@@ -481,6 +522,7 @@ def copy_worker(
         nonlocal processed_count
         nonlocal output_count
         parser = simdjson.Parser()
+        blurrer = BoundingBoxBlurrer()
 
         for i, d in enumerate(ds):
             key_str = parser.parse(d["json"]).get("uid")
@@ -494,6 +536,12 @@ def copy_worker(
             count = b - a
 
             for j in range(count):
+                if face_metadata is not None:
+                    img_buf = np.frombuffer(d["jpg"], np.uint8)
+                    decoded = cv2.imdecode(img_buf, cv2.IMREAD_UNCHANGED)
+                    blurred = blurrer(decoded, face_metadata.loc[key_str])
+                    encoded = cv2.imencode(".jpg", blurred, params = [int(cv2.IMWRITE_JPEG_QUALITY), 95])[1].tobytes()
+                    d["jpg"] = encoded
                 yield {**d, "__key__": f"{key_str}-{j}"}
                 output_count += 1
 
@@ -574,6 +622,13 @@ def main(args):
             with args.subset_file.open("rb") as sf:
                 f.write(sf.read())
             args.subset_file = Path(f.name)
+
+        # If blur is needed, retrieve json with metadata parquet locations.
+        if args.blur_metadata_map is not None:
+            with path_or_cloudpath(args.blur_metadata_map).open("r") as metaf:
+                args.shard_parquets = simdjson.load(metaf)
+        else:
+            args.shard_parquets = None
 
         subset = load_subset(**vars(args))
         print(f"selecting a subset of {len(subset)} examples")
