@@ -266,6 +266,12 @@ def make_argparser():
         default=None,
         help="Map file from shards to parquets for blurring.",
     )
+    parser.add_argument(
+        "--rencode_jpeg_quality",
+        type=str,
+        default=95,
+        help="Quality for reencoding images if necessary."
+    )
     return parser
 
 
@@ -479,6 +485,7 @@ def copy_worker(
     shard_format: str = parser.get_default("shard_format"),
     shard_size: int = parser.get_default("shard_size"),
     shuffle_bufsize: int = parser.get_default("shuffle_bufsize"),
+    jpeq_quality: int = parser.get_default("rencode_jpeg_quality"),
     **_,
 ):
     # print(task.worker_id, task.shards[0], task.shards[-1])
@@ -536,11 +543,11 @@ def copy_worker(
             count = b - a
 
             for j in range(count):
-                if face_metadata is not None:
+                if face_metadata is not None and len(face_metadata.loc[key_str]) > 0:
                     img_buf = np.frombuffer(d["jpg"], np.uint8)
                     decoded = cv2.imdecode(img_buf, cv2.IMREAD_UNCHANGED)
                     blurred = blurrer(decoded, face_metadata.loc[key_str])
-                    encoded = cv2.imencode(".jpg", blurred, params = [int(cv2.IMWRITE_JPEG_QUALITY), 95])[1].tobytes()
+                    encoded = cv2.imencode(".jpg", blurred, params = [int(cv2.IMWRITE_JPEG_QUALITY), jpeq_quality])[1].tobytes()
                     d["jpg"] = encoded
                 yield {**d, "__key__": f"{key_str}-{j}"}
                 output_count += 1
