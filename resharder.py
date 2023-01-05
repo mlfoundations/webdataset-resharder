@@ -272,6 +272,11 @@ def make_argparser():
         default=95,
         help="Quality for reencoding images if necessary.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="do not make any changes to the output directory",
+    )
     return parser
 
 
@@ -484,6 +489,7 @@ def copy_worker(
     shard_size: int = parser.get_default("shard_size"),
     shuffle_bufsize: int = parser.get_default("shuffle_bufsize"),
     jpeq_quality: int = parser.get_default("rencode_jpeg_quality"),
+    dry_run: bool = parser.get_default("dry_run"),
     **_,
 ):
     # print(task.worker_id, task.shards[0], task.shards[-1])
@@ -553,7 +559,10 @@ def copy_worker(
                         params=[int(cv2.IMWRITE_JPEG_QUALITY), jpeq_quality],
                     )[1].tobytes()
                     d["jpg"] = encoded
-                yield {**d, "__key__": f"{key_str}-{j}"}
+
+                if not dry_run:
+                    yield {**d, "__key__": f"{key_str}-{j}"}
+
                 output_count += 1
 
             processed_count += 1
@@ -620,7 +629,7 @@ def main(args):
 
     rmtree_contents(args.output_dir)
 
-    if args.is_master:
+    if args.is_master and not args.dry_run:
         print("copying the subset file")
         output_filename = args.output_dir / "sample_ids.npy"
         if isinstance(args.subset_file, CloudPath):
@@ -665,16 +674,17 @@ def main(args):
                 f"Warning: {len(subset) - output_count} images in the subset were not found in the input!"
             )
 
-        with (args.output_dir / "meta.json").open("w") as f:
-            simdjson.dump(
-                {
-                    **{k: str(v) for k, v in vars(args).items()},
-                    "processed_count": processed_count,
-                    "output_count": output_count,
-                    "cwd": str(Path.cwd()),
-                },
-                f,
-            )
+        if not args.dry_run:
+            with (args.output_dir / "meta.json").open("w") as f:
+                simdjson.dump(
+                    {
+                        **{k: str(v) for k, v in vars(args).items()},
+                        "processed_count": processed_count,
+                        "output_count": output_count,
+                        "cwd": str(Path.cwd()),
+                    },
+                    f,
+                )
 
 
 if __name__ == "__main__":
