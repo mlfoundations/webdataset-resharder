@@ -261,16 +261,16 @@ def make_argparser():
         help="for multi-node processing, indicate whether the current script is the master",
     )
     parser.add_argument(
-        "--blur_metadata_map",
+        "--blur-metadata-map",
         type=str,
         default=None,
         help="Map file from shards to parquets for blurring.",
     )
     parser.add_argument(
-        "--rencode_jpeg_quality",
+        "--rencode-jpeg-quality",
         type=str,
         default=95,
-        help="Quality for reencoding images if necessary."
+        help="Quality for reencoding images if necessary.",
     )
     return parser
 
@@ -428,7 +428,9 @@ def plan_tasks(shards: List[Shard], /, **args):
         reverse_map = {}
         for parquet_id in args["shard_parquets"].keys():
             for shard_file in args["shard_parquets"][parquet_id]["shards"]:
-                reverse_map[path_or_cloudpath(shard_file).name] = args["shard_parquets"][parquet_id]["parquet"]
+                reverse_map[path_or_cloudpath(shard_file).name] = args[
+                    "shard_parquets"
+                ][parquet_id]["parquet"]
 
         parquets = []
         for shard in shards:
@@ -464,11 +466,7 @@ def plan_tasks(shards: List[Shard], /, **args):
             f"worker {worker_id:03d} will process shards {shard_start} to {shard_end-1}"
         )
         worker_tasks.append(
-            WorkerTask(
-                worker_id,
-                shards[shard_start:shard_end],
-                worker_parquets
-            )
+            WorkerTask(worker_id, shards[shard_start:shard_end], worker_parquets)
         )
 
     return worker_tasks
@@ -501,10 +499,12 @@ def copy_worker(
         for parquet in task.parquets:
             with path_or_cloudpath(parquet).open("rb") as f:
                 metadata_list.append(pd.read_parquet(f))
-        face_metadata = pd.concat(metadata_list, axis=0, ignore_index=True).set_index("uid")["face_bboxes"]
+        face_metadata = pd.concat(metadata_list, axis=0, ignore_index=True).set_index(
+            "uid"
+        )["face_bboxes"]
     else:
         face_metadata = None
-    
+
     sw = ShardWriter(
         str(output_dir / f"shard_{task.worker_id:04d}_%07d.tar"),
         maxcount=shard_size,
@@ -547,7 +547,11 @@ def copy_worker(
                     img_buf = np.frombuffer(d["jpg"], np.uint8)
                     decoded = cv2.imdecode(img_buf, cv2.IMREAD_UNCHANGED)
                     blurred = blurrer(decoded, face_metadata.loc[key_str])
-                    encoded = cv2.imencode(".jpg", blurred, params = [int(cv2.IMWRITE_JPEG_QUALITY), jpeq_quality])[1].tobytes()
+                    encoded = cv2.imencode(
+                        ".jpg",
+                        blurred,
+                        params=[int(cv2.IMWRITE_JPEG_QUALITY), jpeq_quality],
+                    )[1].tobytes()
                     d["jpg"] = encoded
                 yield {**d, "__key__": f"{key_str}-{j}"}
                 output_count += 1
