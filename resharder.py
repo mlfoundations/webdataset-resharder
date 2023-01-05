@@ -13,7 +13,8 @@ import cv2
 from pathlib import Path
 from cloudpathlib import CloudPath
 from dataclasses import dataclass
-from typing import List, Optional, Callable, Union
+from typing import List, Optional, Callable, Union, Dict
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -262,12 +263,12 @@ def make_argparser():
     )
     parser.add_argument(
         "--blur-metadata-map",
-        type=str,
+        type=path_or_cloudpath,
         default=None,
         help="Map file from shards to parquets for blurring.",
     )
     parser.add_argument(
-        "--rencode-jpeg-quality",
+        "--reencode-jpeg-quality",
         type=str,
         default=95,
         help="Quality for reencoding images if necessary.",
@@ -423,25 +424,40 @@ def load_subset(*, subset_file: Path, **_):
     return subset
 
 
-def plan_tasks(shards: List[Shard], /, **args):
+def load_parquet_metadata(
+    shards: List[Shard],
+    /,
+    blur_metadata_map: Optional[Pathy] = parser.get_default("blur_metadata_map"),
+    shard_format: str = parser.get_default("shard_format"),
+    **_,
+):
+    if blur_metadata_map is None:
+        return None
+
+    with blur_metadata_map.open("r") as f:
+        parquets = simdjson.load(f)
+
+    parquet_table = {}
+
+    # invert the parquet → shard multi-map
+    for pq in parquets.values():
+        for shard in pq["shards"]:
+            parquet_table[path_or_cloudpath(shard).name] = pq["parquet"]
+
+    parquet_list = []
+    for shard in shards:
+        shard_name = shard_format.format(shard.shard_id)
+        parquet_list.append(parquet_table.get(shard_name))
+        if parquet_list[-1] is None:
+            print(f"Warning: could not find parquet for shard {shard_name}")
+
+    return parquet_list
+
+
+def plan_tasks(shards: List[Shard], parquets: Optional[List[str]] = None, /, **args):
     num_workers = args["num_workers"]
     worker_tasks = []
     total_data = shards[-1].data_start + shards[-1].size
-
-    # Add metadata if needed for blurring
-    if args["shard_parquets"] is not None:
-        reverse_map = {}
-        for parquet_id in args["shard_parquets"].keys():
-            for shard_file in args["shard_parquets"][parquet_id]["shards"]:
-                reverse_map[path_or_cloudpath(shard_file).name] = args[
-                    "shard_parquets"
-                ][parquet_id]["parquet"]
-
-        parquets = []
-        for shard in shards:
-            parquets.append(reverse_map[args["shard_format"].format(shard.shard_id)])
-    else:
-        parquets = None
 
     # evenly distribute data to workers
     data_starts = [shard.data_start for shard in shards]
@@ -461,11 +477,9 @@ def plan_tasks(shards: List[Shard], /, **args):
         first_index = first_shard.data_start
         last_index = last_shard.data_start + last_shard.size - 1
 
-        if parquets is not None:
-            worker_parquets = parquets[shard_start:shard_end]
-            worker_parquets = list(np.unique(worker_parquets))
-        else:
-            worker_parquets = None
+        worker_parquets = (
+            parquets[shard_start:shard_end] if parquets is not None else None
+        )
 
         print(
             f"worker {worker_id:03d} will process shards {shard_start} to {shard_end-1}"
@@ -475,6 +489,23 @@ def plan_tasks(shards: List[Shard], /, **args):
         )
 
     return worker_tasks
+
+
+def apply_blur(
+    blurrer,
+    jpg,
+    blur_bboxes,
+    reencode_jpeg_quality=parser.get_default("reencode_jpeg_quality"),
+):
+    img_buf = np.frombuffer(jpg, np.uint8)
+    decoded = cv2.imdecode(img_buf, cv2.IMREAD_UNCHANGED)
+    blurred = blurrer(decoded, blur_bboxes)
+    encoded = cv2.imencode(
+        ".jpg",
+        blurred,
+        params=[int(cv2.IMWRITE_JPEG_QUALITY), reencode_jpeg_quality],
+    )[1].tobytes()
+    return encoded
 
 
 def copy_worker(
@@ -488,7 +519,7 @@ def copy_worker(
     shard_format: str = parser.get_default("shard_format"),
     shard_size: int = parser.get_default("shard_size"),
     shuffle_bufsize: int = parser.get_default("shuffle_bufsize"),
-    jpeq_quality: int = parser.get_default("rencode_jpeg_quality"),
+    reencode_jpeg_quality: int = parser.get_default("reencode_jpeg_quality"),
     dry_run: bool = parser.get_default("dry_run"),
     **_,
 ):
@@ -499,17 +530,33 @@ def copy_worker(
         [str(input_dir / shard_format.format(shard.shard_id)) for shard in task.shards]
     )
 
-    # Retrieve the parquet files for this task.
-    if task.parquets is not None:
-        metadata_list = []
-        for parquet in task.parquets:
-            with path_or_cloudpath(parquet).open("rb") as f:
-                metadata_list.append(pd.read_parquet(f))
-        face_metadata = pd.concat(metadata_list, axis=0, ignore_index=True).set_index(
-            "uid"
-        )["face_bboxes"]
-    else:
-        face_metadata = None
+    # create shard_name → parquet_name mapping
+    assert task.parquets is None or len(task.shards) == len(task.parquets)
+    parquet_table = (
+        {
+            shard_format.format(shard.shard_id): parquet
+            for shard, parquet in zip(task.shards, task.parquets)
+        }
+        if task.parquets is not None
+        else {}
+    )
+
+    @lru_cache(1)
+    def load_parquet(fname):
+        try:
+            with path_or_cloudpath(fname).open("rb") as f:
+                return pd.read_parquet(f).set_index("uid")["face_bboxes"]
+        except FileNotFoundError:
+            return None
+
+    def load_blur_bboxes(url, uid):
+        fname = parquet_table.get(path_or_cloudpath(url).name)
+        if fname is not None:
+            parquets = load_parquet(fname)
+            if parquets is None:
+                print(f"failed to find parquet for {url}")
+            if parquets is not None:
+                return parquets.get(uid)
 
     sw = ShardWriter(
         str(output_dir / f"shard_{task.worker_id:04d}_%07d.tar"),
@@ -529,11 +576,10 @@ def copy_worker(
             leave=False,
         )
 
-    processed_count, output_count = 0, 0
+    processed_count, output_count, blur_count = 0, 0, 0
 
     def subset_iter():
-        nonlocal processed_count
-        nonlocal output_count
+        nonlocal processed_count, output_count, blur_count
         parser = simdjson.Parser()
         blurrer = BoundingBoxBlurrer()
 
@@ -548,18 +594,20 @@ def copy_worker(
             b = np.searchsorted(subset, key_u16, "right")
             count = b - a
 
-            for j in range(count):
-                if face_metadata is not None and len(face_metadata.loc[key_str]) > 0:
-                    img_buf = np.frombuffer(d["jpg"], np.uint8)
-                    decoded = cv2.imdecode(img_buf, cv2.IMREAD_UNCHANGED)
-                    blurred = blurrer(decoded, face_metadata.loc[key_str])
-                    encoded = cv2.imencode(
-                        ".jpg",
-                        blurred,
-                        params=[int(cv2.IMWRITE_JPEG_QUALITY), jpeq_quality],
-                    )[1].tobytes()
-                    d["jpg"] = encoded
+            if count > 0:
+                blur_bboxes = load_blur_bboxes(d["__url__"], key_str)
+                if blur_bboxes is None:
+                    print(
+                        f"{task.worker_id:04d} failed to find blur bboxes for {d['__url__']}, {key_str}"
+                    )
 
+                elif len(blur_bboxes) > 0:
+                    d["jpg"] = apply_blur(
+                        blurrer, d["jpg"], blur_bboxes, reencode_jpeg_quality
+                    )
+                    blur_count += 1
+
+            for j in range(count):
                 if not dry_run:
                     yield {**d, "__key__": f"{key_str}-{j}"}
 
@@ -585,6 +633,7 @@ def copy_worker(
         bar.close()
         state["processed_count"] += processed_count
         state["output_count"] += output_count
+        state["blur_count"] += blur_count
 
 
 def do_tasks(worker_tasks, args):
@@ -593,6 +642,7 @@ def do_tasks(worker_tasks, args):
     state = manager.dict()
     state["processed_count"] = 0
     state["output_count"] = 0
+    state["blur_count"] = 0
 
     lock = manager.Lock()
 
@@ -645,15 +695,15 @@ def main(args):
 
         # If blur is needed, retrieve json with metadata parquet locations.
         if args.blur_metadata_map is not None:
-            with path_or_cloudpath(args.blur_metadata_map).open("r") as metaf:
-                args.shard_parquets = simdjson.load(metaf)
+            parquets = load_parquet_metadata(shards, **vars(args))
+            print("loading parquet files")
         else:
-            args.shard_parquets = None
+            parquets = None
 
         subset = load_subset(**vars(args))
         print(f"selecting a subset of {len(subset)} examples")
 
-        worker_tasks = plan_tasks(shards, **vars(args))
+        worker_tasks = plan_tasks(shards, parquets, **vars(args))
 
         print("starting workers...")
         start_time = time.perf_counter()
@@ -662,6 +712,7 @@ def main(args):
 
         processed_count = state["processed_count"]
         output_count = state["output_count"]
+        blur_count = state["blur_count"]
 
         print()
         print(
@@ -673,6 +724,8 @@ def main(args):
             print(
                 f"Warning: {len(subset) - output_count} images in the subset were not found in the input!"
             )
+        if blur_count > 0:
+            print(f"applied blur to {blur_count} images")
 
         if not args.dry_run:
             with (args.output_dir / "meta.json").open("w") as f:
