@@ -268,10 +268,20 @@ def make_argparser():
         help="Map file from shards to parquets for blurring.",
     )
     parser.add_argument(
+        "--apply-blur",
+        action="store_true",
+        help="Apply blurring to images and re-encode them",
+    )
+    parser.add_argument(
+        "--inject-blur-metadata",
+        action="store_true",
+        help="Add blur bounding boxes to the json field of the output examples",
+    )
+    parser.add_argument(
         "--reencode-jpeg-quality",
         type=str,
         default=95,
-        help="Quality for reencoding images if necessary.",
+        help="Quality for re-encoding images if necessary.",
     )
     parser.add_argument(
         "--dry-run",
@@ -520,6 +530,8 @@ def copy_worker(
     shard_size: int = parser.get_default("shard_size"),
     shuffle_bufsize: int = parser.get_default("shuffle_bufsize"),
     reencode_jpeg_quality: int = parser.get_default("reencode_jpeg_quality"),
+    apply_blur: bool = parser.get_default("apply_blur"),
+    inject_blur_metadata: bool = parser.get_default("inject_blur_metadata"),
     dry_run: bool = parser.get_default("dry_run"),
     **_,
 ):
@@ -584,7 +596,8 @@ def copy_worker(
         blurrer = BoundingBoxBlurrer()
 
         for i, d in enumerate(ds):
-            key_str = parser.parse(d["json"]).get("uid")
+            json_parsed = parser.parse(d["json"])
+            key_str = json_parsed.get("uid")
             # TODO: is this really the best way to get a u16 scalar?
             key_u16 = np.array([(int(key_str[:16], 16), int(key_str[16:32], 16))], u16)[
                 0
@@ -602,10 +615,16 @@ def copy_worker(
                     )
 
                 elif len(blur_bboxes) > 0:
-                    d["jpg"] = apply_blur(
-                        blurrer, d["jpg"], blur_bboxes, reencode_jpeg_quality
-                    )
-                    blur_count += 1
+                    if apply_blur:
+                        d["jpg"] = apply_blur(
+                            blurrer, d["jpg"], blur_bboxes, reencode_jpeg_quality
+                        )
+                        blur_count += 1
+
+                    if inject_blur_metadata:
+                        json = json_parsed.as_dict()
+                        json["face_bboxes"] = list(map(list, blur_bboxes))
+                        d["json"] = simdjson.dumps(json).encode()
 
             for j in range(count):
                 if not dry_run:
@@ -618,6 +637,8 @@ def copy_worker(
             if i % 1000 == 0 and i > 0:
                 with lock:
                     bar.update(1000)
+
+            del json_parsed
 
     it = subset_iter()
     if shuffle_bufsize > 0:
@@ -687,18 +708,24 @@ def main(args):
         else:
             shutil.copyfile(args.subset_file, output_filename)
 
+    if args.apply_blur and not args.blur_metadata_map:
+        print("error: need to pass --blur-metadata-map to use --apply-blur")
+
+    if args.inject_blur_metadata and not args.blur_metadata_map:
+        print("error: need to pass --blur-metadata-map to use --inject-blur-metadata")
+
+    # If blur is needed, retrieve json with metadata parquet locations.
+    if args.blur_metadata_map is not None:
+        parquets = load_parquet_metadata(shards, **vars(args))
+        print("loading parquet files")
+    else:
+        parquets = None
+
     with tempfile.NamedTemporaryFile("wb") as f:
         if isinstance(args.subset_file, CloudPath):
             with args.subset_file.open("rb") as sf:
                 f.write(sf.read())
             args.subset_file = Path(f.name)
-
-        # If blur is needed, retrieve json with metadata parquet locations.
-        if args.blur_metadata_map is not None:
-            parquets = load_parquet_metadata(shards, **vars(args))
-            print("loading parquet files")
-        else:
-            parquets = None
 
         subset = load_subset(**vars(args))
         print(f"selecting a subset of {len(subset)} examples")
