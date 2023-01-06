@@ -422,13 +422,14 @@ def load_shard_metadata(
 def load_subset(*, subset_file: Path, **_):
     assert not isinstance(subset_file, CloudPath)
 
-    # Detect the NumPy format magic string
-    if open(subset_file, "rb").read(6) == b"\x93NUMPY":
-        subset = np.load(subset_file, mmap_mode="r")
-        assert subset.dtype == u16
+    with open(subset_file, "rb") as f:
+        # Detect the NumPy format magic string
+        if f.read(6) == b"\x93NUMPY":
+            subset = np.load(subset_file, mmap_mode="r")
+            assert subset.dtype == u16
 
-    else:
-        subset = np.memmap(subset_file, u16, mode="r+")
+        else:
+            subset = np.memmap(subset_file, u16, mode="r+")
 
     # print(f"selecting a subset of {len(subset)} examples")
     return subset
@@ -607,7 +608,7 @@ def copy_worker(
             b = np.searchsorted(subset, key_u16, "right")
             count = b - a
 
-            if count > 0:
+            if task.parquets and count > 0:
                 blur_bboxes = load_blur_bboxes(d["__url__"], key_str)
                 if blur_bboxes is None:
                     print(
