@@ -278,9 +278,9 @@ def make_argparser():
         help="Add blur bounding boxes to the json field of the output examples",
     )
     parser.add_argument(
-        "--reencode-jpeg-quality",
+        "--reencode-webp-quality",
         type=str,
-        default=95,
+        default=100,
         help="Quality for re-encoding images if necessary.",
     )
     parser.add_argument(
@@ -502,19 +502,19 @@ def plan_tasks(shards: List[Shard], parquets: Optional[List[str]] = None, /, **a
     return worker_tasks
 
 
-def apply_blur(
+def blur_image(
     blurrer,
     jpg,
     blur_bboxes,
-    reencode_jpeg_quality=parser.get_default("reencode_jpeg_quality"),
+    reencode_webp_quality=parser.get_default("reencode_webp_quality"),
 ):
     img_buf = np.frombuffer(jpg, np.uint8)
     decoded = cv2.imdecode(img_buf, cv2.IMREAD_UNCHANGED)
     blurred = blurrer(decoded, blur_bboxes)
     encoded = cv2.imencode(
-        ".jpg",
+        ".webp",
         blurred,
-        params=[int(cv2.IMWRITE_JPEG_QUALITY), reencode_jpeg_quality],
+        params=[int(cv2.IMWRITE_WEBP_QUALITY), reencode_webp_quality],
     )[1].tobytes()
     return encoded
 
@@ -530,7 +530,7 @@ def copy_worker(
     shard_format: str = parser.get_default("shard_format"),
     shard_size: int = parser.get_default("shard_size"),
     shuffle_bufsize: int = parser.get_default("shuffle_bufsize"),
-    reencode_jpeg_quality: int = parser.get_default("reencode_jpeg_quality"),
+    reencode_webp_quality: int = parser.get_default("reencode_webp_quality"),
     apply_blur: bool = parser.get_default("apply_blur"),
     inject_blur_metadata: bool = parser.get_default("inject_blur_metadata"),
     dry_run: bool = parser.get_default("dry_run"),
@@ -617,9 +617,10 @@ def copy_worker(
 
                 elif len(blur_bboxes) > 0:
                     if apply_blur:
-                        d["jpg"] = apply_blur(
-                            blurrer, d["jpg"], blur_bboxes, reencode_jpeg_quality
+                        d["webp"] = blur_image(
+                            blurrer, d["jpg"], blur_bboxes, reencode_webp_quality
                         )
+                        del d["jpg"]  # Remove jpg version of image
                         blur_count += 1
 
                     if inject_blur_metadata:
