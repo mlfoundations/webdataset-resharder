@@ -3,6 +3,8 @@
 import time
 import re
 import multiprocessing as mp
+import queue
+import threading
 import shutil
 import os
 import argparse
@@ -520,9 +522,10 @@ def apply_blur(
 
 
 def copy_worker(
-    state,
-    lock,
     task: WorkerTask,
+    state: mp.managers.DictProxy,
+    lock: mp.managers.AcquirerProxy,
+    log_queue,
     *,
     input_dir: Pathy,
     output_dir: Pathy,
@@ -581,13 +584,6 @@ def copy_worker(
     total_data = (
         task.shards[-1].data_start + task.shards[-1].size - task.shards[0].data_start
     )
-    with lock:
-        bar = tqdm.tqdm(
-            desc=f"worker {task.worker_id:03d}",
-            total=total_data,
-            position=task.worker_id,
-            leave=False,
-        )
 
     processed_count, output_count, blur_count = 0, 0, 0
 
@@ -635,11 +631,12 @@ def copy_worker(
 
             processed_count += 1
 
-            if i % 1000 == 0 and i > 0:
-                with lock:
-                    bar.update(1000)
+            if processed_count % 1000 == 0:
+                log_queue.put_nowait(1000)
 
             del json_parsed
+
+        log_queue.put_nowait(processed_count % 1000)
 
     it = subset_iter()
     if shuffle_bufsize > 0:
@@ -651,11 +648,33 @@ def copy_worker(
     sw.close()
 
     with lock:
-        bar.update(total_data - bar.n)
-        bar.close()
         state["processed_count"] += processed_count
         state["output_count"] += output_count
         state["blur_count"] += blur_count
+
+
+def logging_handler(total_data, log_queue):
+    bar = tqdm.tqdm(total=total_data)
+
+    while True:
+        try:
+            work = log_queue.get(timeout=1)
+            if work is None:
+                break
+
+            bar.update(work)
+
+        except queue.Empty:
+            pass
+
+        except:
+            from sys import stderr
+            from traceback import print_exc
+
+            print_exc(file=stderr)
+            raise
+
+    bar.close()
 
 
 def do_tasks(worker_tasks, args):
@@ -667,17 +686,32 @@ def do_tasks(worker_tasks, args):
     state["blur_count"] = 0
 
     lock = manager.Lock()
+    log_queue = manager.Queue()
+
+    # not very elegant
+    last_shard = worker_tasks[-1].shards[-1]
+    total_data = last_shard.data_start + last_shard.size
+
+    logging_thread = threading.Thread(
+        target=logging_handler, args=(total_data, log_queue)
+    )
+    logging_thread.daemon = True
 
     processes = [
-        mp.Process(target=copy_worker, args=(state, lock, task), kwargs=args)
+        mp.Process(target=copy_worker, args=(task, state, lock, log_queue), kwargs=args)
         for task in worker_tasks
     ]
 
+    logging_thread.start()
     for p in processes:
         p.start()
 
     for p in processes:
         p.join()
+
+    # send the sentinel value to the thread to tell it to exit
+    log_queue.put_nowait(None)
+    logging_thread.join()
 
     return state
 
@@ -742,7 +776,6 @@ def main(args):
         output_count = state["output_count"]
         blur_count = state["blur_count"]
 
-        print()
         print(
             f"processed {total_data} images in {elapsed_time:.3f}s ({total_data/elapsed_time:.2f} images/sec)"
         )
