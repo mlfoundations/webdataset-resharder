@@ -33,8 +33,13 @@ Pipe = wds.writer.gopen.Pipe
 Pathy = Union[Path, CloudPath]
 
 
-class ColoredConsoleHandler(logging.StreamHandler):
+class ColoredConsoleHandler(logging.Handler):
     # TODO: Abstract ANSI color escapes
+    def __init__(self, sub_handler=None):
+        super().__init__()
+        self.sub_handler = (
+            logging.StreamHandler() if sub_handler is None else sub_handler
+        )
 
     def emit(self, record):
         # Need to make a actual copy of the record
@@ -63,7 +68,51 @@ class ColoredConsoleHandler(logging.StreamHandler):
             tag = "DEBUG"
 
         myrecord.msg = f"{color}[{tag}]\x1b[0m {myrecord.msg}"
-        logging.StreamHandler.emit(self, myrecord)
+        self.sub_handler.emit(myrecord)
+
+
+class TqdmLoggingHandler(logging.Handler):
+    def __init__(self, level=logging.NOTSET):
+        super().__init__(level)
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            tqdm.tqdm.write(msg)
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
+
+class MultiProcessingHandler(logging.Handler):
+    def __init__(self, name, queue):
+        super().__init__()
+        self.name = name
+        self.queue = queue
+
+    def _format_record(self, record):
+        if record.args:
+            record.msg = record.msg % record.args
+            record.args = None
+        if record.exc_info:
+            self.format(record)
+            record.exc_info = None
+
+        record.msg = f"[{self.name}] {record.msg}"
+
+        return record
+
+    def emit(self, record):
+        record = self._format_record(record)
+        self.queue.put_nowait(record)
+
+
+def setup_process_logging(log_queue, worker_id):
+    logger = logging.getLogger()
+    for handler in logger.handlers:
+        logger.removeHandler(handler)
+
+    logger.addHandler(MultiProcessingHandler(f"worker {worker_id:03d}", log_queue))
 
 
 logging.basicConfig(
@@ -581,6 +630,8 @@ def copy_worker(
     dry_run: bool = parser.get_default("dry_run"),
     **_,
 ):
+    setup_process_logging(log_queue, task.worker_id)
+
     subset = load_subset(subset_file=subset_file)
     ds = wds.WebDataset(
         [str(input_dir / shard_format.format(shard.shard_id)) for shard in task.shards]
@@ -610,7 +661,7 @@ def copy_worker(
         if fname is not None:
             parquets = load_parquet(fname)
             if parquets is None:
-                print(f"failed to find parquet for {url}")
+                logging.error(f"failed to find parquet for {url}")
             if parquets is not None:
                 return parquets.get(uid)
 
@@ -647,7 +698,7 @@ def copy_worker(
             if task.parquets and count > 0:
                 blur_bboxes = load_blur_bboxes(d["__url__"], key_str)
                 if blur_bboxes is None:
-                    print(
+                    logging.error(
                         f"{task.worker_id:04d} failed to find blur bboxes for {d['__url__']}, {key_str}"
                     )
 
@@ -695,14 +746,19 @@ def copy_worker(
 
 def logging_handler(total_data, log_queue):
     bar = tqdm.tqdm(total=total_data)
+    handler = ColoredConsoleHandler(TqdmLoggingHandler())
 
     while True:
         try:
-            work = log_queue.get(timeout=1)
-            if work is None:
+            message = log_queue.get(timeout=1)
+            if message is None:
                 break
 
-            bar.update(work)
+            if isinstance(message, int):
+                bar.update(message)
+
+            if isinstance(message, logging.LogRecord):
+                handler.emit(message)
 
         except queue.Empty:
             pass
