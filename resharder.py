@@ -108,18 +108,19 @@ class MultiProcessingHandler(logging.Handler):
 
 
 def setup_process_logging(log_queue, worker_id):
-    logger = logging.getLogger()
+    logger = logging.getLogger("resharder")
     for handler in logger.handlers:
         logger.removeHandler(handler)
 
     logger.addHandler(MultiProcessingHandler(f"worker {worker_id:03d}", log_queue))
+    return logger
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    handlers=[ColoredConsoleHandler()],
-    format="%(asctime)s %(message)s",
-)
+logger = logging.getLogger("resharder")
+logger.setLevel(logging.INFO)
+log_handler = logging.StreamHandler()
+logger.addHandler(ColoredConsoleHandler(log_handler))
+log_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
 
 
 # Monkey-patch webdataset to support S3 via aws s3
@@ -162,15 +163,16 @@ class ShardWriter:
 
     def __init__(
         self,
-        pattern: str,
+        namer: Callable,
         maxcount: int = 100000,
         maxsize: float = 3e9,
         post: Optional[Callable] = None,
         start_shard: int = 0,
+        logger: Optional[logging.Logger] = None,
         **kw,
     ):
         """Create a ShardWriter.
-        :param pattern: output file pattern
+        :param namer: function mapping shard number to output file name
         :param maxcount: maximum number of records per shard (Default value = 100000)
         :param maxsize: maximum size of each shard (Default value = 3e9)
         :param kw: other options passed to TarWriter
@@ -183,7 +185,8 @@ class ShardWriter:
 
         self.tarstream = None
         self.shard = start_shard
-        self.pattern = pattern
+        self.namer = namer
+        self.logger = logger
         self.total = 0
         self.count = 0
         self.size = 0
@@ -193,7 +196,7 @@ class ShardWriter:
     def next_stream(self):
         """Close the current stream and move to the next."""
         self.finish()
-        self.fname = self.pattern % self.shard
+        self.fname = self.namer(self.shard)
 
         self.shard += 1
 
@@ -226,6 +229,11 @@ class ShardWriter:
             if callable(self.post):
                 self.post(self.fname)
             self.tarstream = None
+
+            self.logger.debug(
+                f"wrote {self.fname} {self.size / 1e9:.1f} GB, {self.count}/{self.total}"
+            )
+
         if self.stream is not None:
             self.stream.close()
 
@@ -382,6 +390,20 @@ def make_argparser():
         action="store_true",
         help="do not make any changes to the output directory",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="append_const",
+        const=1,
+        help="decrease the logging level",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="append_const",
+        const=1,
+        help="increase the logging level",
+    )
     return parser
 
 
@@ -451,13 +473,13 @@ def load_shard_metadata(
     table = {}
     shard_table_path = input_dir / shard_table
     if shard_table_path.exists():
-        logging.info(f"loading shard table {shard_table_path}")
+        logger.info(f"loading shard table {shard_table_path}")
         with open(shard_table_path, "rb") as f:
             try:
                 table = simdjson.load(f)
             except ValueError as e:
-                logging.error(f"shard table parsing error: {e.args[0]}")
-            logging.info(f"shard table has size {len(table)}")
+                logger.error(f"shard table parsing error: {e.args[0]}")
+            logger.info(f"shard table has size {len(table)}")
 
     if not num_shards and not table:
         num_shards = guess_num_shards(
@@ -465,7 +487,7 @@ def load_shard_metadata(
             first_shard=first_shard,
             shard_format=shard_format,
         )
-        logging.info(f"binary search found {num_shards} potential shards")
+        logger.info(f"binary search found {num_shards} potential shards")
 
     if not num_shards:
         num_shards = len(table) - first_shard
@@ -500,13 +522,13 @@ def load_shard_metadata(
             shards.append(Shard(shard_id, offset, size))
             offset += size
         else:
-            logging.warning(f"missing shard {shard_name}")
+            logger.warning(f"missing shard {shard_name}")
 
     total_data = shards[-1].data_start + shards[-1].size
-    logging.info(f"found a total of {len(shards)} shards with {total_data} examples")
+    logger.info(f"found a total of {len(shards)} shards with {total_data} examples")
 
     if write_shard_table and not shard_table_path.exists():
-        logging.info("writing shard table")
+        logger.info("writing shard table")
         with shard_table_path.open("w") as f:
             simdjson.dump(table, f)
 
@@ -553,7 +575,7 @@ def load_parquet_metadata(
         shard_name = shard_format.format(shard.shard_id)
         parquet_list.append(parquet_table.get(shard_name))
         if parquet_list[-1] is None:
-            logging.error(f"could not find parquet for shard {shard_name}")
+            logger.error(f"could not find parquet for shard {shard_name}")
 
     return parquet_list
 
@@ -585,7 +607,7 @@ def plan_tasks(shards: List[Shard], parquets: Optional[List[str]] = None, /, **a
             parquets[shard_start:shard_end] if parquets is not None else None
         )
 
-        logging.info(
+        logger.info(
             f"worker {worker_id:03d} will process shards {shard_start} to {shard_end-1}"
         )
         worker_tasks.append(
@@ -630,7 +652,7 @@ def copy_worker(
     dry_run: bool = parser.get_default("dry_run"),
     **_,
 ):
-    setup_process_logging(log_queue, task.worker_id)
+    logger = setup_process_logging(log_queue, task.worker_id)
 
     subset = load_subset(subset_file=subset_file)
     ds = wds.WebDataset(
@@ -651,6 +673,7 @@ def copy_worker(
     @lru_cache(1)
     def load_parquet(fname):
         try:
+            logger.debug(f"loading parquet {fname}")
             with path_or_cloudpath(fname).open("rb") as f:
                 return pd.read_parquet(f).set_index("uid")["face_bboxes"]
         except FileNotFoundError:
@@ -661,13 +684,14 @@ def copy_worker(
         if fname is not None:
             parquets = load_parquet(fname)
             if parquets is None:
-                logging.error(f"failed to find parquet for {url}")
+                logger.error(f"failed to find parquet for {url}")
             if parquets is not None:
                 return parquets.get(uid)
 
     sw = ShardWriter(
-        str(output_dir / f"shard_{task.worker_id:04d}_%07d.tar"),
+        lambda i: str(output_dir / f"shard_{task.worker_id:04d}_%07d.tar") % i,
         maxcount=shard_size,
+        logger=logger,
     )
 
     sw.verbose = False
@@ -698,7 +722,7 @@ def copy_worker(
             if task.parquets and count > 0:
                 blur_bboxes = load_blur_bboxes(d["__url__"], key_str)
                 if blur_bboxes is None:
-                    logging.error(
+                    logger.error(
                         f"{task.worker_id:04d} failed to find blur bboxes for {d['__url__']}, {key_str}"
                     )
 
@@ -746,7 +770,11 @@ def copy_worker(
 
 def logging_handler(total_data, log_queue):
     bar = tqdm.tqdm(total=total_data)
-    handler = ColoredConsoleHandler(TqdmLoggingHandler())
+
+    # this feels a bit ad-hoc
+    tqdm_handler = TqdmLoggingHandler()
+    tqdm_handler.setFormatter(log_handler.formatter)
+    handler = ColoredConsoleHandler(tqdm_handler)
 
     while True:
         try:
@@ -819,13 +847,28 @@ def rmtree_contents(path: Pathy):
 
 
 def postprocess_output(*, output_dir, shard_format, **_):
-    logging.info("postprocessing output shards")
+    logger.info("postprocessing output shards")
     for i, shard in enumerate(sorted(output_dir.iterdir())):
         shard.rename(output_dir / shard_format.format(i))
 
 
+def set_loglevel(logger, /, verbose, quiet, **_):
+    verbose = 0 if verbose is None else sum(verbose)
+    quiet = 0 if quiet is None else sum(quiet)
+    log_levels = [
+        logging.DEBUG,
+        logging.INFO,
+        logging.WARNING,
+        logging.ERROR,
+        logging.CRITICAL,
+    ]
+    logger.setLevel(log_levels[max(min(1 - verbose + quiet, len(log_levels)), 0)])
+
+
 def main(args):
-    logging.info("loading shard metadata")
+    set_loglevel(logger, **vars(args))
+
+    logger.info("loading shard metadata")
     shards, total_data = load_shard_metadata(**vars(args))
     if len(shards) < args.num_workers:
         args.num_workers = len(shards)
@@ -833,7 +876,7 @@ def main(args):
     rmtree_contents(args.output_dir)
 
     if args.is_master and not args.dry_run:
-        logging.info("copying the subset file")
+        logger.info("copying the subset file")
         output_filename = args.output_dir / "sample_ids.npy"
         if isinstance(args.subset_file, CloudPath):
             args.subset_file.copy(output_filename)
@@ -841,31 +884,31 @@ def main(args):
             shutil.copyfile(args.subset_file, output_filename)
 
     if args.apply_blur and not args.blur_metadata_map:
-        logging.fatal("need to pass --blur-metadata-map to use --apply-blur")
+        logger.fatal("need to pass --blur-metadata-map to use --apply-blur")
 
     if args.inject_blur_metadata and not args.blur_metadata_map:
-        logging.fatal("need to pass --blur-metadata-map to use --inject-blur-metadata")
+        logger.fatal("need to pass --blur-metadata-map to use --inject-blur-metadata")
 
     # If blur is needed, retrieve json with metadata parquet locations.
     if args.blur_metadata_map is not None:
         parquets = load_parquet_metadata(shards, **vars(args))
-        logging.info("loading parquet files")
+        logger.info("loading parquet files")
     else:
         parquets = None
 
     with tempfile.NamedTemporaryFile("wb") as f:
         if isinstance(args.subset_file, CloudPath):
-            logging.info("copying remote subset file to local machine")
+            logger.info("copying remote subset file to local machine")
             with args.subset_file.open("rb") as sf:
                 f.write(sf.read())
             args.subset_file = Path(f.name)
 
         subset = load_subset(**vars(args))
-        logging.info(f"selecting a subset of {len(subset)} examples")
+        logger.info(f"selecting a subset of {len(subset)} examples")
 
         worker_tasks = plan_tasks(shards, parquets, **vars(args))
 
-        logging.info("starting workers...")
+        logger.info("starting workers...")
         start_time = time.perf_counter()
         state = do_tasks(worker_tasks, vars(args))
         elapsed_time = time.perf_counter() - start_time
@@ -874,17 +917,17 @@ def main(args):
         output_count = state["output_count"]
         blur_count = state["blur_count"]
 
-        logging.info(
+        logger.info(
             f"processed {total_data} images in {elapsed_time:.3f}s ({total_data/elapsed_time:.2f} images/sec)"
         )
 
-        logging.info(f"output {output_count} images")
+        logger.info(f"output {output_count} images")
         if output_count != len(subset):
-            logging.warning(
+            logger.warning(
                 f"{len(subset) - output_count} images in the subset were not found in the input!"
             )
         if blur_count > 0:
-            logging.info(f"applied blur to {blur_count} images")
+            logger.info(f"applied blur to {blur_count} images")
 
         if not args.dry_run:
             with (args.output_dir / "meta.json").open("w") as f:
