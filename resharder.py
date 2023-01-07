@@ -1,34 +1,77 @@
 #!/usr/bin/env python3
 
-import time
-import re
-import multiprocessing as mp
-import queue
-import threading
-import shutil
-import os
 import argparse
 import bisect
+import copy
+import logging
+import multiprocessing as mp
+import os
+import queue
+import re
+import shutil
 import tempfile
-import cv2
+import threading
+import time
 
-from pathlib import Path
-from cloudpathlib import CloudPath
 from dataclasses import dataclass
-from typing import List, Optional, Callable, Union, Dict
 from functools import lru_cache
+from pathlib import Path
+from typing import List, Optional, Callable, Union, Dict
 
+import cv2
 import numpy as np
 import pandas as pd
-import tqdm
 import simdjson
+import tqdm
 import webdataset as wds
 
+from cloudpathlib import CloudPath
 from img2dataset.blurrer import BoundingBoxBlurrer
 
-Pipe = wds.writer.gopen.Pipe
 
+Pipe = wds.writer.gopen.Pipe
 Pathy = Union[Path, CloudPath]
+
+
+class ColoredConsoleHandler(logging.StreamHandler):
+    # TODO: Abstract ANSI color escapes
+
+    def emit(self, record):
+        # Need to make a actual copy of the record
+        # to prevent altering the message for other loggers
+        myrecord = copy.copy(record)
+        levelno = myrecord.levelno
+
+        # NOTSET and anything else
+        color = "\x1b[0m"  # normal
+        tag = "NOTSET"
+
+        if levelno >= logging.FATAL:
+            color = "\x1b[31m"  # red
+            tag = "FATAL"
+        elif levelno >= logging.ERROR:
+            color = "\x1b[31m"  # red
+            tag = "ERROR"
+        elif levelno >= logging.WARNING:
+            color = "\x1b[33m"  # yellow
+            tag = "WARN"
+        elif levelno >= logging.INFO:
+            color = "\x1b[32m"  # green
+            tag = "INFO"
+        elif levelno >= logging.DEBUG:
+            color = "\x1b[35m"  # pink
+            tag = "DEBUG"
+
+        myrecord.msg = f"{color}[{tag}]\x1b[0m {myrecord.msg}"
+        logging.StreamHandler.emit(self, myrecord)
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[ColoredConsoleHandler()],
+    format="%(asctime)s %(message)s",
+)
+
 
 # Monkey-patch webdataset to support S3 via aws s3
 
@@ -359,13 +402,13 @@ def load_shard_metadata(
     table = {}
     shard_table_path = input_dir / shard_table
     if shard_table_path.exists():
-        print(f"loading shard table {shard_table_path}")
+        logging.info(f"loading shard table {shard_table_path}")
         with open(shard_table_path, "rb") as f:
             try:
                 table = simdjson.load(f)
             except ValueError as e:
-                print(f"shard table parsing error: {e.args[0]}")
-            print(f"shard table has size {len(table)}")
+                logging.error(f"shard table parsing error: {e.args[0]}")
+            logging.info(f"shard table has size {len(table)}")
 
     if not num_shards and not table:
         num_shards = guess_num_shards(
@@ -373,7 +416,7 @@ def load_shard_metadata(
             first_shard=first_shard,
             shard_format=shard_format,
         )
-        print(f"binary search found {num_shards} potential shards")
+        logging.info(f"binary search found {num_shards} potential shards")
 
     if not num_shards:
         num_shards = len(table) - first_shard
@@ -408,13 +451,13 @@ def load_shard_metadata(
             shards.append(Shard(shard_id, offset, size))
             offset += size
         else:
-            print(f"missing shard {shard_name}")
+            logging.warning(f"missing shard {shard_name}")
 
     total_data = shards[-1].data_start + shards[-1].size
-    print(f"found a total of {len(shards)} shards with {total_data} examples")
+    logging.info(f"found a total of {len(shards)} shards with {total_data} examples")
 
     if write_shard_table and not shard_table_path.exists():
-        print("writing shard table")
+        logging.info("writing shard table")
         with shard_table_path.open("w") as f:
             simdjson.dump(table, f)
 
@@ -433,7 +476,6 @@ def load_subset(*, subset_file: Path, **_):
         else:
             subset = np.memmap(subset_file, u16, mode="r+")
 
-    # print(f"selecting a subset of {len(subset)} examples")
     return subset
 
 
@@ -462,7 +504,7 @@ def load_parquet_metadata(
         shard_name = shard_format.format(shard.shard_id)
         parquet_list.append(parquet_table.get(shard_name))
         if parquet_list[-1] is None:
-            print(f"Warning: could not find parquet for shard {shard_name}")
+            logging.error(f"could not find parquet for shard {shard_name}")
 
     return parquet_list
 
@@ -494,7 +536,7 @@ def plan_tasks(shards: List[Shard], parquets: Optional[List[str]] = None, /, **a
             parquets[shard_start:shard_end] if parquets is not None else None
         )
 
-        print(
+        logging.info(
             f"worker {worker_id:03d} will process shards {shard_start} to {shard_end-1}"
         )
         worker_tasks.append(
@@ -539,8 +581,6 @@ def copy_worker(
     dry_run: bool = parser.get_default("dry_run"),
     **_,
 ):
-    # print(task.worker_id, task.shards[0], task.shards[-1])
-
     subset = load_subset(subset_file=subset_file)
     ds = wds.WebDataset(
         [str(input_dir / shard_format.format(shard.shard_id)) for shard in task.shards]
@@ -723,12 +763,13 @@ def rmtree_contents(path: Pathy):
 
 
 def postprocess_output(*, output_dir, shard_format, **_):
-    print("postprocessing output shards")
+    logging.info("postprocessing output shards")
     for i, shard in enumerate(sorted(output_dir.iterdir())):
         shard.rename(output_dir / shard_format.format(i))
 
 
 def main(args):
+    logging.info("loading shard metadata")
     shards, total_data = load_shard_metadata(**vars(args))
     if len(shards) < args.num_workers:
         args.num_workers = len(shards)
@@ -736,7 +777,7 @@ def main(args):
     rmtree_contents(args.output_dir)
 
     if args.is_master and not args.dry_run:
-        print("copying the subset file")
+        logging.info("copying the subset file")
         output_filename = args.output_dir / "sample_ids.npy"
         if isinstance(args.subset_file, CloudPath):
             args.subset_file.copy(output_filename)
@@ -744,30 +785,31 @@ def main(args):
             shutil.copyfile(args.subset_file, output_filename)
 
     if args.apply_blur and not args.blur_metadata_map:
-        print("error: need to pass --blur-metadata-map to use --apply-blur")
+        logging.fatal("need to pass --blur-metadata-map to use --apply-blur")
 
     if args.inject_blur_metadata and not args.blur_metadata_map:
-        print("error: need to pass --blur-metadata-map to use --inject-blur-metadata")
+        logging.fatal("need to pass --blur-metadata-map to use --inject-blur-metadata")
 
     # If blur is needed, retrieve json with metadata parquet locations.
     if args.blur_metadata_map is not None:
         parquets = load_parquet_metadata(shards, **vars(args))
-        print("loading parquet files")
+        logging.info("loading parquet files")
     else:
         parquets = None
 
     with tempfile.NamedTemporaryFile("wb") as f:
         if isinstance(args.subset_file, CloudPath):
+            logging.info("copying remote subset file to local machine")
             with args.subset_file.open("rb") as sf:
                 f.write(sf.read())
             args.subset_file = Path(f.name)
 
         subset = load_subset(**vars(args))
-        print(f"selecting a subset of {len(subset)} examples")
+        logging.info(f"selecting a subset of {len(subset)} examples")
 
         worker_tasks = plan_tasks(shards, parquets, **vars(args))
 
-        print("starting workers...")
+        logging.info("starting workers...")
         start_time = time.perf_counter()
         state = do_tasks(worker_tasks, vars(args))
         elapsed_time = time.perf_counter() - start_time
@@ -776,17 +818,17 @@ def main(args):
         output_count = state["output_count"]
         blur_count = state["blur_count"]
 
-        print(
+        logging.info(
             f"processed {total_data} images in {elapsed_time:.3f}s ({total_data/elapsed_time:.2f} images/sec)"
         )
 
-        print(f"output {output_count} images")
+        logging.info(f"output {output_count} images")
         if output_count != len(subset):
-            print(
-                f"Warning: {len(subset) - output_count} images in the subset were not found in the input!"
+            logging.warning(
+                f"{len(subset) - output_count} images in the subset were not found in the input!"
             )
         if blur_count > 0:
-            print(f"applied blur to {blur_count} images")
+            logging.info(f"applied blur to {blur_count} images")
 
         if not args.dry_run:
             with (args.output_dir / "meta.json").open("w") as f:
