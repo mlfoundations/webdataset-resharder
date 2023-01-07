@@ -333,13 +333,19 @@ def make_argparser():
     )
     parser.add_argument(
         "--shard-format",
-        default="{:05d}.tar",
+        default="{:08d}.tar",
         type=str,
-        help="format for each shard in str.format syntax",
+        help="format for each input shard in str.format syntax",
+    )
+    parser.add_argument(
+        "--output-shard-format",
+        default="{:08d}.tar",
+        type=str,
+        help="format for each output shard in str.format syntax",
     )
     parser.add_argument(
         "--shard-stats-format",
-        default="{:05d}_stats.json",
+        default="{:08d}_stats.json",
         type=str,
         help="format for each shard stats file in str.format syntax",
     )
@@ -644,6 +650,7 @@ def copy_worker(
     output_dir: Pathy,
     subset_file: Path,
     shard_format: str = parser.get_default("shard_format"),
+    output_shard_format: str = parser.get_default("output_shard_format"),
     shard_size: int = parser.get_default("shard_size"),
     shuffle_bufsize: int = parser.get_default("shuffle_bufsize"),
     reencode_jpeg_quality: int = parser.get_default("reencode_jpeg_quality"),
@@ -688,11 +695,14 @@ def copy_worker(
             if parquets is not None:
                 return parquets.get(uid)
 
-    sw = ShardWriter(
-        lambda i: str(output_dir / f"shard_{task.worker_id:04d}_%07d.tar") % i,
-        maxcount=shard_size,
-        logger=logger,
-    )
+    def output_shard_namer(_shard):
+        with lock:
+            i = state["output_shard_count"]
+            state["output_shard_count"] += 1
+
+        return str(output_dir / shard_format.format(i))
+
+    sw = ShardWriter(output_shard_namer, maxcount=shard_size, logger=logger)
 
     sw.verbose = False
 
@@ -808,6 +818,7 @@ def do_tasks(worker_tasks, args):
     state["processed_count"] = 0
     state["output_count"] = 0
     state["blur_count"] = 0
+    state["output_shard_count"] = 0
 
     lock = manager.Lock()
     log_queue = manager.Queue()
@@ -873,10 +884,11 @@ def main(args):
     if len(shards) < args.num_workers:
         args.num_workers = len(shards)
 
+    logger.info("deleting files from output directory")
     rmtree_contents(args.output_dir)
 
     if args.is_master and not args.dry_run:
-        logger.info("copying the subset file")
+        logger.info("copying the subset file to the output directory")
         output_filename = args.output_dir / "sample_ids.npy"
         if isinstance(args.subset_file, CloudPath):
             args.subset_file.copy(output_filename)
@@ -916,6 +928,7 @@ def main(args):
         processed_count = state["processed_count"]
         output_count = state["output_count"]
         blur_count = state["blur_count"]
+        output_shard_count = state["output_shard_count"]
 
         logger.info(
             f"processed {total_data} images in {elapsed_time:.3f}s ({total_data/elapsed_time:.2f} images/sec)"
@@ -926,6 +939,9 @@ def main(args):
             logger.warning(
                 f"{len(subset) - output_count} images in the subset were not found in the input!"
             )
+
+        logger.info(f"wrote {output_shard_count} output shards")
+
         if blur_count > 0:
             logger.info(f"applied blur to {blur_count} images")
 
@@ -934,8 +950,7 @@ def main(args):
                 simdjson.dump(
                     {
                         **{k: str(v) for k, v in vars(args).items()},
-                        "processed_count": processed_count,
-                        "output_count": output_count,
+                        **state,
                         "cwd": str(Path.cwd()),
                     },
                     f,
