@@ -473,7 +473,7 @@ def plan_tasks(shards: List[Shard], parquets: Optional[List[str]] = None, /, **a
     # evenly distribute data to workers
     data_starts = [shard.data_start for shard in shards]
     shard_chunks = [
-        np.searchsorted(data_starts, i, side="right")
+        np.searchsorted(data_starts, i, side="left")
         for i in range(0, total_data, -(-total_data // num_workers))
     ]
     shard_chunks.append(len(shards))
