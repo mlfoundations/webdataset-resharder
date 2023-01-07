@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional, Callable, Union, Dict
+from multiprocessing.managers import DictProxy, AcquirerProxy
 
 import cv2
 import numpy as np
@@ -648,8 +649,8 @@ def blur_image(
 
 def copy_worker(
     task: WorkerTask,
-    state: mp.managers.DictProxy,
-    lock: mp.managers.AcquirerProxy,
+    state: DictProxy,
+    lock: AcquirerProxy,
     log_queue,
     *,
     input_dir: Pathy,
@@ -710,7 +711,7 @@ def copy_worker(
             output_shard_index = state["output_shard_count"]
             state["output_shard_count"] += 1
 
-        return str(output_dir / shard_format.format(output_shard_index))
+        return str(output_dir / output_shard_format.format(output_shard_index))
 
     def output_shard_size_writer(count, **_):
         with (output_dir / output_shard_stats_format.format(output_shard_index)).open(
