@@ -227,7 +227,7 @@ class ShardWriter:
             self.tarstream.close()
             assert self.fname is not None
             if callable(self.post):
-                self.post(self.fname)
+                self.post(fname=self.fname, count=self.count, size=self.size)
             self.tarstream = None
 
             self.logger.debug(
@@ -347,7 +347,13 @@ def make_argparser():
         "--shard-stats-format",
         default="{:08d}_stats.json",
         type=str,
-        help="format for each shard stats file in str.format syntax",
+        help="format for each input shard stats file in str.format syntax",
+    )
+    parser.add_argument(
+        "--output-shard-stats-format",
+        default="{:08d}_stats.json",
+        type=str,
+        help="format for each output shard stats file in str.format syntax",
     )
     parser.add_argument(
         "--shard-table",
@@ -651,6 +657,7 @@ def copy_worker(
     subset_file: Path,
     shard_format: str = parser.get_default("shard_format"),
     output_shard_format: str = parser.get_default("output_shard_format"),
+    output_shard_stats_format: str = parser.get_default("output_shard_stats_format"),
     shard_size: int = parser.get_default("shard_size"),
     shuffle_bufsize: int = parser.get_default("shuffle_bufsize"),
     reencode_jpeg_quality: int = parser.get_default("reencode_jpeg_quality"),
@@ -695,14 +702,28 @@ def copy_worker(
             if parquets is not None:
                 return parquets.get(uid)
 
+    output_shard_index = None
+
     def output_shard_namer(_shard):
+        nonlocal output_shard_index
         with lock:
-            i = state["output_shard_count"]
+            output_shard_index = state["output_shard_count"]
             state["output_shard_count"] += 1
 
-        return str(output_dir / shard_format.format(i))
+        return str(output_dir / shard_format.format(output_shard_index))
 
-    sw = ShardWriter(output_shard_namer, maxcount=shard_size, logger=logger)
+    def output_shard_size_writer(count, **_):
+        with (output_dir / output_shard_stats_format.format(output_shard_index)).open(
+            "w"
+        ) as f:
+            simdjson.dump({"successes": count}, f)
+
+    sw = ShardWriter(
+        output_shard_namer,
+        maxcount=shard_size,
+        logger=logger,
+        post=output_shard_size_writer,
+    )
 
     sw.verbose = False
 
