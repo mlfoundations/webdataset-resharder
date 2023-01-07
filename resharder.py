@@ -1,32 +1,127 @@
 #!/usr/bin/env python3
 
-import time
-import re
-import multiprocessing as mp
-import shutil
-import os
 import argparse
 import bisect
+import copy
+import logging
+import multiprocessing as mp
+import os
+import queue
+import re
+import shutil
 import tempfile
-import cv2
+import threading
+import time
 
-from pathlib import Path
-from cloudpathlib import CloudPath
 from dataclasses import dataclass
-from typing import List, Optional, Callable, Union, Dict
 from functools import lru_cache
+from pathlib import Path
+from typing import List, Optional, Callable, Union, Dict
 
+import cv2
 import numpy as np
 import pandas as pd
-import tqdm
 import simdjson
+import tqdm
 import webdataset as wds
 
+from cloudpathlib import CloudPath
 from img2dataset.blurrer import BoundingBoxBlurrer
 
-Pipe = wds.writer.gopen.Pipe
 
+Pipe = wds.writer.gopen.Pipe
 Pathy = Union[Path, CloudPath]
+
+
+class ColoredConsoleHandler(logging.Handler):
+    # TODO: Abstract ANSI color escapes
+    def __init__(self, sub_handler=None):
+        super().__init__()
+        self.sub_handler = (
+            logging.StreamHandler() if sub_handler is None else sub_handler
+        )
+
+    def emit(self, record):
+        # Need to make a actual copy of the record
+        # to prevent altering the message for other loggers
+        myrecord = copy.copy(record)
+        levelno = myrecord.levelno
+
+        # NOTSET and anything else
+        color = "\x1b[0m"  # normal
+        tag = "NOTSET"
+
+        if levelno >= logging.FATAL:
+            color = "\x1b[31m"  # red
+            tag = "FATAL"
+        elif levelno >= logging.ERROR:
+            color = "\x1b[31m"  # red
+            tag = "ERROR"
+        elif levelno >= logging.WARNING:
+            color = "\x1b[33m"  # yellow
+            tag = "WARN"
+        elif levelno >= logging.INFO:
+            color = "\x1b[32m"  # green
+            tag = "INFO"
+        elif levelno >= logging.DEBUG:
+            color = "\x1b[35m"  # pink
+            tag = "DEBUG"
+
+        myrecord.msg = f"{color}[{tag}]\x1b[0m {myrecord.msg}"
+        self.sub_handler.emit(myrecord)
+
+
+class TqdmLoggingHandler(logging.Handler):
+    def __init__(self, level=logging.NOTSET):
+        super().__init__(level)
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            tqdm.tqdm.write(msg)
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
+
+class MultiProcessingHandler(logging.Handler):
+    def __init__(self, name, queue):
+        super().__init__()
+        self.name = name
+        self.queue = queue
+
+    def _format_record(self, record):
+        if record.args:
+            record.msg = record.msg % record.args
+            record.args = None
+        if record.exc_info:
+            self.format(record)
+            record.exc_info = None
+
+        record.msg = f"[{self.name}] {record.msg}"
+
+        return record
+
+    def emit(self, record):
+        record = self._format_record(record)
+        self.queue.put_nowait(record)
+
+
+def setup_process_logging(log_queue, worker_id):
+    logger = logging.getLogger("resharder")
+    for handler in logger.handlers:
+        logger.removeHandler(handler)
+
+    logger.addHandler(MultiProcessingHandler(f"worker {worker_id:03d}", log_queue))
+    return logger
+
+
+logger = logging.getLogger("resharder")
+logger.setLevel(logging.INFO)
+log_handler = logging.StreamHandler()
+logger.addHandler(ColoredConsoleHandler(log_handler))
+log_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+
 
 # Monkey-patch webdataset to support S3 via aws s3
 
@@ -68,15 +163,16 @@ class ShardWriter:
 
     def __init__(
         self,
-        pattern: str,
+        namer: Callable,
         maxcount: int = 100000,
         maxsize: float = 3e9,
         post: Optional[Callable] = None,
         start_shard: int = 0,
+        logger: Optional[logging.Logger] = None,
         **kw,
     ):
         """Create a ShardWriter.
-        :param pattern: output file pattern
+        :param namer: function mapping shard number to output file name
         :param maxcount: maximum number of records per shard (Default value = 100000)
         :param maxsize: maximum size of each shard (Default value = 3e9)
         :param kw: other options passed to TarWriter
@@ -89,7 +185,8 @@ class ShardWriter:
 
         self.tarstream = None
         self.shard = start_shard
-        self.pattern = pattern
+        self.namer = namer
+        self.logger = logger
         self.total = 0
         self.count = 0
         self.size = 0
@@ -99,7 +196,7 @@ class ShardWriter:
     def next_stream(self):
         """Close the current stream and move to the next."""
         self.finish()
-        self.fname = self.pattern % self.shard
+        self.fname = self.namer(self.shard)
 
         self.shard += 1
 
@@ -130,8 +227,13 @@ class ShardWriter:
             self.tarstream.close()
             assert self.fname is not None
             if callable(self.post):
-                self.post(self.fname)
+                self.post(fname=self.fname, count=self.count, size=self.size)
             self.tarstream = None
+
+            self.logger.debug(
+                f"wrote {self.fname} {self.size / 1e9:.1f} GB, {self.count}/{self.total}"
+            )
+
         if self.stream is not None:
             self.stream.close()
 
@@ -231,15 +333,27 @@ def make_argparser():
     )
     parser.add_argument(
         "--shard-format",
-        default="{:05d}.tar",
+        default="{:08d}.tar",
         type=str,
-        help="format for each shard in str.format syntax",
+        help="format for each input shard in str.format syntax",
+    )
+    parser.add_argument(
+        "--output-shard-format",
+        default="{:08d}.tar",
+        type=str,
+        help="format for each output shard in str.format syntax",
     )
     parser.add_argument(
         "--shard-stats-format",
-        default="{:05d}_stats.json",
+        default="{:08d}_stats.json",
         type=str,
-        help="format for each shard stats file in str.format syntax",
+        help="format for each input shard stats file in str.format syntax",
+    )
+    parser.add_argument(
+        "--output-shard-stats-format",
+        default="{:08d}_stats.json",
+        type=str,
+        help="format for each output shard stats file in str.format syntax",
     )
     parser.add_argument(
         "--shard-table",
@@ -287,6 +401,20 @@ def make_argparser():
         "--dry-run",
         action="store_true",
         help="do not make any changes to the output directory",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="append_const",
+        const=1,
+        help="decrease the logging level",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="append_const",
+        const=1,
+        help="increase the logging level",
     )
     return parser
 
@@ -357,13 +485,13 @@ def load_shard_metadata(
     table = {}
     shard_table_path = input_dir / shard_table
     if shard_table_path.exists():
-        print(f"loading shard table {shard_table_path}")
+        logger.info(f"loading shard table {shard_table_path}")
         with open(shard_table_path, "rb") as f:
             try:
                 table = simdjson.load(f)
             except ValueError as e:
-                print(f"shard table parsing error: {e.args[0]}")
-            print(f"shard table has size {len(table)}")
+                logger.error(f"shard table parsing error: {e.args[0]}")
+            logger.info(f"shard table has size {len(table)}")
 
     if not num_shards and not table:
         num_shards = guess_num_shards(
@@ -371,7 +499,7 @@ def load_shard_metadata(
             first_shard=first_shard,
             shard_format=shard_format,
         )
-        print(f"binary search found {num_shards} potential shards")
+        logger.info(f"binary search found {num_shards} potential shards")
 
     if not num_shards:
         num_shards = len(table) - first_shard
@@ -406,13 +534,13 @@ def load_shard_metadata(
             shards.append(Shard(shard_id, offset, size))
             offset += size
         else:
-            print(f"missing shard {shard_name}")
+            logger.warning(f"missing shard {shard_name}")
 
     total_data = shards[-1].data_start + shards[-1].size
-    print(f"found a total of {len(shards)} shards with {total_data} examples")
+    logger.info(f"found a total of {len(shards)} shards with {total_data} examples")
 
     if write_shard_table and not shard_table_path.exists():
-        print("writing shard table")
+        logger.info("writing shard table")
         with shard_table_path.open("w") as f:
             simdjson.dump(table, f)
 
@@ -431,7 +559,6 @@ def load_subset(*, subset_file: Path, **_):
         else:
             subset = np.memmap(subset_file, u16, mode="r+")
 
-    # print(f"selecting a subset of {len(subset)} examples")
     return subset
 
 
@@ -460,7 +587,7 @@ def load_parquet_metadata(
         shard_name = shard_format.format(shard.shard_id)
         parquet_list.append(parquet_table.get(shard_name))
         if parquet_list[-1] is None:
-            print(f"Warning: could not find parquet for shard {shard_name}")
+            logger.error(f"could not find parquet for shard {shard_name}")
 
     return parquet_list
 
@@ -473,7 +600,7 @@ def plan_tasks(shards: List[Shard], parquets: Optional[List[str]] = None, /, **a
     # evenly distribute data to workers
     data_starts = [shard.data_start for shard in shards]
     shard_chunks = [
-        np.searchsorted(data_starts, i, side="right")
+        np.searchsorted(data_starts, i, side="left")
         for i in range(0, total_data, -(-total_data // num_workers))
     ]
     shard_chunks.append(len(shards))
@@ -492,7 +619,7 @@ def plan_tasks(shards: List[Shard], parquets: Optional[List[str]] = None, /, **a
             parquets[shard_start:shard_end] if parquets is not None else None
         )
 
-        print(
+        logger.info(
             f"worker {worker_id:03d} will process shards {shard_start} to {shard_end-1}"
         )
         worker_tasks.append(
@@ -520,14 +647,17 @@ def blur_image(
 
 
 def copy_worker(
-    state,
-    lock,
     task: WorkerTask,
+    state: mp.managers.DictProxy,
+    lock: mp.managers.AcquirerProxy,
+    log_queue,
     *,
     input_dir: Pathy,
     output_dir: Pathy,
     subset_file: Path,
     shard_format: str = parser.get_default("shard_format"),
+    output_shard_format: str = parser.get_default("output_shard_format"),
+    output_shard_stats_format: str = parser.get_default("output_shard_stats_format"),
     shard_size: int = parser.get_default("shard_size"),
     shuffle_bufsize: int = parser.get_default("shuffle_bufsize"),
     reencode_webp_quality: int = parser.get_default("reencode_webp_quality"),
@@ -536,7 +666,7 @@ def copy_worker(
     dry_run: bool = parser.get_default("dry_run"),
     **_,
 ):
-    # print(task.worker_id, task.shards[0], task.shards[-1])
+    logger = setup_process_logging(log_queue, task.worker_id)
 
     subset = load_subset(subset_file=subset_file)
     ds = wds.WebDataset(
@@ -557,6 +687,7 @@ def copy_worker(
     @lru_cache(1)
     def load_parquet(fname):
         try:
+            logger.debug(f"loading parquet {fname}")
             with path_or_cloudpath(fname).open("rb") as f:
                 return pd.read_parquet(f).set_index("uid")["face_bboxes"]
         except FileNotFoundError:
@@ -567,13 +698,31 @@ def copy_worker(
         if fname is not None:
             parquets = load_parquet(fname)
             if parquets is None:
-                print(f"failed to find parquet for {url}")
+                logger.error(f"failed to find parquet for {url}")
             if parquets is not None:
                 return parquets.get(uid)
 
+    output_shard_index = None
+
+    def output_shard_namer(_shard):
+        nonlocal output_shard_index
+        with lock:
+            output_shard_index = state["output_shard_count"]
+            state["output_shard_count"] += 1
+
+        return str(output_dir / shard_format.format(output_shard_index))
+
+    def output_shard_size_writer(count, **_):
+        with (output_dir / output_shard_stats_format.format(output_shard_index)).open(
+            "w"
+        ) as f:
+            simdjson.dump({"successes": count}, f)
+
     sw = ShardWriter(
-        str(output_dir / f"shard_{task.worker_id:04d}_%07d.tar"),
+        output_shard_namer,
         maxcount=shard_size,
+        logger=logger,
+        post=output_shard_size_writer,
     )
 
     sw.verbose = False
@@ -581,13 +730,6 @@ def copy_worker(
     total_data = (
         task.shards[-1].data_start + task.shards[-1].size - task.shards[0].data_start
     )
-    with lock:
-        bar = tqdm.tqdm(
-            desc=f"worker {task.worker_id:03d}",
-            total=total_data,
-            position=task.worker_id,
-            leave=False,
-        )
 
     processed_count, output_count, blur_count = 0, 0, 0
 
@@ -611,7 +753,7 @@ def copy_worker(
             if task.parquets and count > 0:
                 blur_bboxes = load_blur_bboxes(d["__url__"], key_str)
                 if blur_bboxes is None:
-                    print(
+                    logger.error(
                         f"{task.worker_id:04d} failed to find blur bboxes for {d['__url__']}, {key_str}"
                     )
 
@@ -636,11 +778,12 @@ def copy_worker(
 
             processed_count += 1
 
-            if i % 1000 == 0 and i > 0:
-                with lock:
-                    bar.update(1000)
+            if processed_count % 1000 == 0:
+                log_queue.put_nowait(1000)
 
             del json_parsed
+
+        log_queue.put_nowait(processed_count % 1000)
 
     it = subset_iter()
     if shuffle_bufsize > 0:
@@ -652,11 +795,42 @@ def copy_worker(
     sw.close()
 
     with lock:
-        bar.update(total_data - bar.n)
-        bar.close()
         state["processed_count"] += processed_count
         state["output_count"] += output_count
         state["blur_count"] += blur_count
+
+
+def logging_handler(total_data, log_queue):
+    bar = tqdm.tqdm(total=total_data)
+
+    # this feels a bit ad-hoc
+    tqdm_handler = TqdmLoggingHandler()
+    tqdm_handler.setFormatter(log_handler.formatter)
+    handler = ColoredConsoleHandler(tqdm_handler)
+
+    while True:
+        try:
+            message = log_queue.get(timeout=1)
+            if message is None:
+                break
+
+            if isinstance(message, int):
+                bar.update(message)
+
+            if isinstance(message, logging.LogRecord):
+                handler.emit(message)
+
+        except queue.Empty:
+            pass
+
+        except:
+            from sys import stderr
+            from traceback import print_exc
+
+            print_exc(file=stderr)
+            raise
+
+    bar.close()
 
 
 def do_tasks(worker_tasks, args):
@@ -666,19 +840,35 @@ def do_tasks(worker_tasks, args):
     state["processed_count"] = 0
     state["output_count"] = 0
     state["blur_count"] = 0
+    state["output_shard_count"] = 0
 
     lock = manager.Lock()
+    log_queue = manager.Queue()
+
+    # not very elegant
+    last_shard = worker_tasks[-1].shards[-1]
+    total_data = last_shard.data_start + last_shard.size
+
+    logging_thread = threading.Thread(
+        target=logging_handler, args=(total_data, log_queue)
+    )
+    logging_thread.daemon = True
 
     processes = [
-        mp.Process(target=copy_worker, args=(state, lock, task), kwargs=args)
+        mp.Process(target=copy_worker, args=(task, state, lock, log_queue), kwargs=args)
         for task in worker_tasks
     ]
 
+    logging_thread.start()
     for p in processes:
         p.start()
 
     for p in processes:
         p.join()
+
+    # send the sentinel value to the thread to tell it to exit
+    log_queue.put_nowait(None)
+    logging_thread.join()
 
     return state
 
@@ -690,20 +880,37 @@ def rmtree_contents(path: Pathy):
 
 
 def postprocess_output(*, output_dir, shard_format, **_):
-    print("postprocessing output shards")
+    logger.info("postprocessing output shards")
     for i, shard in enumerate(sorted(output_dir.iterdir())):
         shard.rename(output_dir / shard_format.format(i))
 
 
+def set_loglevel(logger, /, verbose, quiet, **_):
+    verbose = 0 if verbose is None else sum(verbose)
+    quiet = 0 if quiet is None else sum(quiet)
+    log_levels = [
+        logging.DEBUG,
+        logging.INFO,
+        logging.WARNING,
+        logging.ERROR,
+        logging.CRITICAL,
+    ]
+    logger.setLevel(log_levels[max(min(1 - verbose + quiet, len(log_levels)), 0)])
+
+
 def main(args):
+    set_loglevel(logger, **vars(args))
+
+    logger.info("loading shard metadata")
     shards, total_data = load_shard_metadata(**vars(args))
     if len(shards) < args.num_workers:
         args.num_workers = len(shards)
 
+    logger.info("deleting files from output directory")
     rmtree_contents(args.output_dir)
 
     if args.is_master and not args.dry_run:
-        print("copying the subset file")
+        logger.info("copying the subset file to the output directory")
         output_filename = args.output_dir / "sample_ids.npy"
         if isinstance(args.subset_file, CloudPath):
             args.subset_file.copy(output_filename)
@@ -711,30 +918,31 @@ def main(args):
             shutil.copyfile(args.subset_file, output_filename)
 
     if args.apply_blur and not args.blur_metadata_map:
-        print("error: need to pass --blur-metadata-map to use --apply-blur")
+        logger.fatal("need to pass --blur-metadata-map to use --apply-blur")
 
     if args.inject_blur_metadata and not args.blur_metadata_map:
-        print("error: need to pass --blur-metadata-map to use --inject-blur-metadata")
+        logger.fatal("need to pass --blur-metadata-map to use --inject-blur-metadata")
 
     # If blur is needed, retrieve json with metadata parquet locations.
     if args.blur_metadata_map is not None:
         parquets = load_parquet_metadata(shards, **vars(args))
-        print("loading parquet files")
+        logger.info("loading parquet files")
     else:
         parquets = None
 
     with tempfile.NamedTemporaryFile("wb") as f:
         if isinstance(args.subset_file, CloudPath):
+            logger.info("copying remote subset file to local machine")
             with args.subset_file.open("rb") as sf:
                 f.write(sf.read())
             args.subset_file = Path(f.name)
 
         subset = load_subset(**vars(args))
-        print(f"selecting a subset of {len(subset)} examples")
+        logger.info(f"selecting a subset of {len(subset)} examples")
 
         worker_tasks = plan_tasks(shards, parquets, **vars(args))
 
-        print("starting workers...")
+        logger.info("starting workers...")
         start_time = time.perf_counter()
         state = do_tasks(worker_tasks, vars(args))
         elapsed_time = time.perf_counter() - start_time
@@ -742,27 +950,29 @@ def main(args):
         processed_count = state["processed_count"]
         output_count = state["output_count"]
         blur_count = state["blur_count"]
+        output_shard_count = state["output_shard_count"]
 
-        print()
-        print(
+        logger.info(
             f"processed {total_data} images in {elapsed_time:.3f}s ({total_data/elapsed_time:.2f} images/sec)"
         )
 
-        print(f"output {output_count} images")
+        logger.info(f"output {output_count} images")
         if output_count != len(subset):
-            print(
-                f"Warning: {len(subset) - output_count} images in the subset were not found in the input!"
+            logger.warning(
+                f"{len(subset) - output_count} images in the subset were not found in the input!"
             )
+
+        logger.info(f"wrote {output_shard_count} output shards")
+
         if blur_count > 0:
-            print(f"applied blur to {blur_count} images")
+            logger.info(f"applied blur to {blur_count} images")
 
         if not args.dry_run:
             with (args.output_dir / "meta.json").open("w") as f:
                 simdjson.dump(
                     {
                         **{k: str(v) for k, v in vars(args).items()},
-                        "processed_count": processed_count,
-                        "output_count": output_count,
+                        **state,
                         "cwd": str(Path.cwd()),
                     },
                     f,
