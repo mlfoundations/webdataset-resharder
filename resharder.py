@@ -588,7 +588,7 @@ def load_parquet_metadata(
         shard_name = shard_format.format(shard.shard_id)
         parquet_list.append(parquet_table.get(shard_name))
         if parquet_list[-1] is None:
-            logger.error(f"could not find parquet for shard {shard_name}")
+            logger.warning(f"could not find parquet for shard {shard_name}")
 
     return parquet_list
 
@@ -620,7 +620,7 @@ def plan_tasks(shards: List[Shard], parquets: Optional[List[str]] = None, /, **a
             parquets[shard_start:shard_end] if parquets is not None else None
         )
 
-        logger.info(
+        logger.debug(
             f"worker {worker_id:03d} will process shards {shard_start} to {shard_end-1}"
         )
         worker_tasks.append(
@@ -794,6 +794,9 @@ def copy_worker(
         sw.write(d)
 
     sw.close()
+
+    if processed_count != total_data:
+        logger.error(f"expected {total_data} samples but found {processed_count}")
 
     with lock:
         state["processed_count"] += processed_count
