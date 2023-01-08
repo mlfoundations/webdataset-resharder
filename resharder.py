@@ -671,7 +671,8 @@ def copy_worker(
 
     subset = load_subset(subset_file=subset_file)
     ds = wds.WebDataset(
-        [str(input_dir / shard_format.format(shard.shard_id)) for shard in task.shards]
+        [str(input_dir / shard_format.format(shard.shard_id)) for shard in task.shards],
+        handler=lambda exn: logger.error(repr(exn)),
     )
 
     # create shard_name → parquet_name mapping
