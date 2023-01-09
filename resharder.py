@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional, Callable, Union, Dict
-from multiprocessing.managers import DictProxy, AcquirerProxy
+from multiprocessing.managers import NamespaceProxy, AcquirerProxy
 
 import cv2
 import numpy as np
@@ -649,7 +649,7 @@ def blur_image(
 
 def copy_worker(
     task: WorkerTask,
-    state: DictProxy,
+    state: NamespaceProxy,
     lock: AcquirerProxy,
     log_queue,
     *,
@@ -709,8 +709,8 @@ def copy_worker(
     def output_shard_namer(_shard):
         nonlocal output_shard_index
         with lock:
-            output_shard_index = state["output_shard_count"]
-            state["output_shard_count"] += 1
+            output_shard_index = state.output_shard_count
+            state.output_shard_count += 1
 
         return str(output_dir / output_shard_format.format(output_shard_index))
 
@@ -800,9 +800,9 @@ def copy_worker(
         logger.error(f"expected {total_data} samples but found {processed_count}")
 
     with lock:
-        state["processed_count"] += processed_count
-        state["output_count"] += output_count
-        state["blur_count"] += blur_count
+        state.processed_count += processed_count
+        state.output_count += output_count
+        state.blur_count += blur_count
 
 
 def logging_handler(total_data, log_queue):
@@ -841,11 +841,11 @@ def logging_handler(total_data, log_queue):
 def do_tasks(worker_tasks, args):
     manager = mp.Manager()
 
-    state = manager.dict()
-    state["processed_count"] = 0
-    state["output_count"] = 0
-    state["blur_count"] = 0
-    state["output_shard_count"] = 0
+    state = manager.Namespace()
+    state.processed_count = 0
+    state.output_count = 0
+    state.blur_count = 0
+    state.output_shard_count = 0
 
     lock = manager.Lock()
     log_queue = manager.Queue()
@@ -952,32 +952,31 @@ def main(args):
         state = do_tasks(worker_tasks, vars(args))
         elapsed_time = time.perf_counter() - start_time
 
-        processed_count = state["processed_count"]
-        output_count = state["output_count"]
-        blur_count = state["blur_count"]
-        output_shard_count = state["output_shard_count"]
-
         logger.info(
-            f"processed {total_data} images in {elapsed_time:.3f}s ({total_data/elapsed_time:.2f} images/sec)"
+            f"processed {state.processed_count} images in {elapsed_time:.3f}s ({total_data/elapsed_time:.2f} images/sec)"
         )
-
-        logger.info(f"output {output_count} images")
-        if output_count != len(subset):
-            logger.warning(
-                f"{len(subset) - output_count} images in the subset were not found in the input!"
+        if state.processed_count != total_data:
+            logger.error(
+                f"expected {total_data} samples but found {state.processed_count}"
             )
 
-        logger.info(f"wrote {output_shard_count} output shards")
+        logger.info(f"output {state.output_count} images")
+        if state.output_count != len(subset):
+            logger.warning(
+                f"{len(subset) - state.output_count} images in the subset were not found in the input!"
+            )
 
-        if blur_count > 0:
-            logger.info(f"applied blur to {blur_count} images")
+        logger.info(f"wrote {state.output_shard_count} output shards")
+
+        if state.blur_count > 0:
+            logger.info(f"applied blur to {state.blur_count} images")
 
         if not args.dry_run:
             with (args.output_dir / "meta.json").open("w") as f:
                 simdjson.dump(
                     {
                         **{k: str(v) for k, v in vars(args).items()},
-                        **state,
+                        **vars(state._getvalue()),
                         "cwd": str(Path.cwd()),
                     },
                     f,
