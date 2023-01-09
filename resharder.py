@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import threading
 import time
+import traceback
 
 from dataclasses import dataclass
 from functools import lru_cache
@@ -81,7 +82,7 @@ class TqdmLoggingHandler(logging.Handler):
             msg = self.format(record)
             tqdm.tqdm.write(msg)
             self.flush()
-        except Exception:
+        except:
             self.handleError(record)
 
 
@@ -192,7 +193,6 @@ class ShardWriter:
         self.count = 0
         self.size = 0
         self.fname = None
-        self.stream = None
 
     def next_stream(self):
         """Close the current stream and move to the next."""
@@ -201,7 +201,6 @@ class ShardWriter:
 
         self.shard += 1
 
-        self.stream = None
         self.tarstream = wds.TarWriter(self.fname, **self.kw)
 
         self.count = 0
@@ -217,15 +216,30 @@ class ShardWriter:
             or self.size >= self.maxsize
         ):
             self.next_stream()
-        size = self.tarstream.write(obj)
-        self.count += 1
-        self.total += 1
-        self.size += size
+
+        try:
+            size = self.tarstream.write(obj)
+            self.count += 1
+            self.total += 1
+            self.size += size
+
+        except:
+            logger.error(traceback.format_exc())
+
+            # outrageous hack to ensure we don't write more to the broken pipe
+            self.tarstream.tarstream.fileobj.closed = True
+            self.tarstream = None
+            self.next_stream()
 
     def finish(self):
         """Finish all writing (use close instead)."""
         if self.tarstream is not None:
-            self.tarstream.close()
+            try:
+                self.tarstream.close()
+
+            except:
+                logger.error(traceback.format_exc())
+
             assert self.fname is not None
             if callable(self.post):
                 self.post(fname=self.fname, count=self.count, size=self.size)
@@ -234,9 +248,6 @@ class ShardWriter:
             self.logger.debug(
                 f"wrote {self.fname} {self.size / 1e9:.1f} GB, {self.count}/{self.total}"
             )
-
-        if self.stream is not None:
-            self.stream.close()
 
     def close(self):
         """Close the stream."""
@@ -672,7 +683,7 @@ def copy_worker(
     subset = load_subset(subset_file=subset_file)
     ds = wds.WebDataset(
         [str(input_dir / shard_format.format(shard.shard_id)) for shard in task.shards],
-        handler=lambda exn: logger.error(repr(exn)),
+        handler=lambda exn: logger.error(f"webdataset error: {repr(exn)}"),
     )
 
     # create shard_name → parquet_name mapping
@@ -736,11 +747,11 @@ def copy_worker(
     processed_count, output_count, blur_count = 0, 0, 0
 
     def subset_iter():
-        nonlocal processed_count, output_count, blur_count
         parser = simdjson.Parser()
         blurrer = BoundingBoxBlurrer()
 
-        for i, d in enumerate(ds):
+        def process_example(d):
+            nonlocal processed_count, output_count, blur_count
             json_parsed = parser.parse(d["json"])
             key_str = json_parsed.get("uid")
             # TODO: is this really the best way to get a u16 scalar?
@@ -783,7 +794,14 @@ def copy_worker(
             if processed_count % 1000 == 0:
                 log_queue.put_nowait(1000)
 
-            del json_parsed
+            # del json_parsed
+
+        for input_data in ds:
+            try:
+                for output_data in process_example(input_data):
+                    yield output_data
+            except:
+                logger.error(traceback.format_exc())
 
         log_queue.put_nowait(processed_count % 1000)
 
