@@ -677,10 +677,14 @@ def copy_worker(
 ):
     logger = setup_process_logging(log_queue, task.worker_id)
 
+    def log_and_continue(exn):
+        logger.error(f"webdataset error: {repr(exn)}")
+        return True
+
     subset = load_subset(subset_file=subset_file)
     ds = wds.WebDataset(
         [str(input_dir / shard_format.format(shard.shard_id)) for shard in task.shards],
-        handler=lambda exn: logger.error(f"webdataset error: {repr(exn)}"),
+        handler=log_and_continue,
     )
 
     # create shard_name → parquet_name mapping
