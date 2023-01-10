@@ -807,9 +807,15 @@ def copy_worker(
         it = wds.filters._shuffle(it, shuffle_bufsize, shuffle_bufsize)
 
     for d in it:
-        sw.write(d)
+        try:
+            sw.write(d)
+        except:
+            logger.error(traceback.format_exc())
 
-    sw.close()
+    try:
+        sw.close()
+    except:
+        logger.error(traceback.format_exc())
 
     if processed_count != total_data:
         logger.error(f"expected {total_data} samples but found {processed_count}")
@@ -818,6 +824,7 @@ def copy_worker(
         state.processed_count += processed_count
         state.output_count += output_count
         state.blur_count += blur_count
+        state.worker_success += 1
 
 
 def logging_handler(total_data, log_queue):
@@ -861,6 +868,7 @@ def do_tasks(worker_tasks, args):
     state.output_count = 0
     state.blur_count = 0
     state.output_shard_count = 0
+    state.worker_success = 0
 
     lock = manager.Lock()
     log_queue = manager.Queue()
@@ -885,6 +893,9 @@ def do_tasks(worker_tasks, args):
 
     for p in processes:
         p.join()
+
+    if state.worker_success != len(worker_tasks):
+        logger.error(f"{len(worker_tasks) - state.worker_success} workers failed")
 
     # send the sentinel value to the thread to tell it to exit
     log_queue.put_nowait(None)
