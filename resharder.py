@@ -266,7 +266,7 @@ class ShardWriter:
         self.close()
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class Shard:
     shard_id: int
     data_start: int
