@@ -789,7 +789,7 @@ def copy_worker(
             if processed_count % 1000 == 0:
                 log_queue.put_nowait(1000)
 
-            # del json_parsed
+            del json_parsed
 
         for input_data in ds:
             try:
