@@ -752,9 +752,7 @@ def copy_worker(
             json_parsed = parser.parse(d["json"])
             key_str = json_parsed.get("uid")
             # TODO: is this really the best way to get a u16 scalar?
-            key_u16 = np.array([(int(key_str[:16], 16), int(key_str[16:32], 16))], u16)[
-                0
-            ]
+            key_u16 = np.array([divmod(int(key_str, 16), 2**64)], u16)[0]
 
             a = np.searchsorted(subset, key_u16, "left")
             b = np.searchsorted(subset, key_u16, "right")
