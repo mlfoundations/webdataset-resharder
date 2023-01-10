@@ -525,7 +525,7 @@ def load_shard_metadata(
                 shard_format,
                 shard_stats_format,
             )
-            for shard_id in tqdm.tqdm(shard_ids)
+            for shard_id in tqdm.tqdm(shard_ids, dynamic_ncols=True)
             if shard_format.format(shard_id) not in table
         ),
         chunksize=16,
@@ -826,7 +826,7 @@ def copy_worker(
 
 
 def logging_handler(total_data, log_queue):
-    bar = tqdm.tqdm(total=total_data)
+    bar = tqdm.tqdm(total=total_data, dynamic_ncols=True)
 
     # this feels a bit ad-hoc
     tqdm_handler = TqdmLoggingHandler()
