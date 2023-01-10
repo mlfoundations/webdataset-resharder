@@ -9,6 +9,8 @@ import os
 import queue
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -128,6 +130,21 @@ log_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
 # Monkey-patch webdataset to support S3 via aws s3
 
 
+class ResharderPipe(Pipe):
+    def wait_for_child(self):
+        self.status = self.proc.wait()
+        if self.proc.stderr:
+            stderr = self.proc.stderr.read().decode()
+            # Don't pass KeyboardInterrupt through
+            if stderr and not stderr.endswith("\nKeyboardInterrupt\n"):
+                logger.error(f"captured error from aws-cli: {stderr}")
+
+        if self.status not in self.ignore_status and not self.ignore_errors:
+            raise Exception(
+                f"{self.args}: exit {self.status} (read) {wds.writer.gopen.info}"
+            )
+
+
 def gopen_aws(url, mode="rb", bufsize=8192):
     """Open a URL with `aws s3`.
     :param url: url (usually, s3:// etc.)
@@ -137,21 +154,23 @@ def gopen_aws(url, mode="rb", bufsize=8192):
     # TODO not sure about ignore_status
     if mode[0] == "r":
         cmd = f"aws s3 cp '{url}' -"
-        return Pipe(
+        return ResharderPipe(
             cmd,
             mode=mode,
             shell=True,
             bufsize=bufsize,
             ignore_status=[141, 23],
+            stderr=subprocess.PIPE,
         )
     elif mode[0] == "w":
         cmd = f"aws s3 cp - '{url}'"
-        return Pipe(
+        return ResharderPipe(
             cmd,
             mode=mode,
             shell=True,
             bufsize=bufsize,
             ignore_status=[141, 26],
+            stderr=subprocess.PIPE,
         )
     else:
         raise ValueError(f"{mode}: unknown mode")
@@ -639,10 +658,10 @@ def plan_tasks(shards: List[Shard], parquets: Optional[List[str]] = None, /, **a
 
 
 def blur_image(
-    blurrer,
-    jpg,
+    blurrer: BoundingBoxBlurrer,
+    jpg: bytes,
     blur_bboxes,
-    reencode_webp_quality=parser.get_default("reencode_webp_quality"),
+    reencode_webp_quality: int = parser.get_default("reencode_webp_quality"),
 ):
     img_buf = np.frombuffer(jpg, np.uint8)
     decoded = cv2.imdecode(img_buf, cv2.IMREAD_UNCHANGED)
@@ -981,7 +1000,7 @@ def main(args):
         elapsed_time = time.perf_counter() - start_time
 
         logger.info(
-            f"processed {state.processed_count} images in {elapsed_time:.3f}s ({total_data/elapsed_time:.2f} images/sec)"
+            f"processed {state.processed_count} images in {elapsed_time:.3f}s ({state.processed_count/elapsed_time:.2f} images/sec)"
         )
         if state.processed_count != total_data:
             logger.error(
