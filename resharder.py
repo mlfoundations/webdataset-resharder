@@ -505,7 +505,7 @@ def load_shard_metadata(
                 logger.error(f"shard table parsing error: {e.args[0]}")
             logger.info(f"shard table has size {len(table)}")
 
-    if not num_shards and not table:
+    if not num_shards:
         num_shards = guess_num_shards(
             input_dir=input_dir,
             first_shard=first_shard,
@@ -513,10 +513,8 @@ def load_shard_metadata(
         )
         logger.info(f"binary search found {num_shards} potential shards")
 
-    if not num_shards:
-        num_shards = len(table) - first_shard
-
     shard_ids = range(first_shard, first_shard + num_shards)
+
     pool = mp.Pool(num_workers)
     size_iter = pool.imap(
         load_shard_size,
@@ -528,6 +526,7 @@ def load_shard_metadata(
                 shard_stats_format,
             )
             for shard_id in tqdm.tqdm(shard_ids)
+            if shard_format.format(shard_id) not in table
         ),
         chunksize=16,
     )
@@ -537,9 +536,7 @@ def load_shard_metadata(
             table[shard_name] = size
 
     for shard_id in shard_ids:
-        size_path = input_dir / shard_stats_format.format(shard_id)
         shard_name = shard_format.format(shard_id)
-        shard_path = input_dir / shard_name
 
         if shard_name in table:
             size = table[shard_name]
