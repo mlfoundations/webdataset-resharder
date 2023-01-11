@@ -399,7 +399,7 @@ def make_argparser():
         help="write shard table to output_dir if it does not exist",
     )
     parser.add_argument(
-        "--shuffle-bufsize", default=100000, type=int, help="buffer size for shuffling"
+        "--shuffle-bufsize", default=0, type=int, help="buffer size for shuffling"
     )
     parser.add_argument(
         "--blur-metadata-map",
