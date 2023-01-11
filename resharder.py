@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -84,7 +85,7 @@ class TqdmLoggingHandler(logging.Handler):
             msg = self.format(record)
             tqdm.tqdm.write(msg)
             self.flush()
-        except:
+        except Exception:
             self.handleError(record)
 
 
@@ -242,7 +243,7 @@ class ShardWriter:
             self.total += 1
             self.size += size
 
-        except:
+        except Exception:
             logger.error(traceback.format_exc())
 
             # outrageous hack to ensure we don't write more to the broken pipe
@@ -256,7 +257,7 @@ class ShardWriter:
             try:
                 self.tarstream.close()
 
-            except:
+            except Exception:
                 logger.error(traceback.format_exc())
 
             assert self.fname is not None
@@ -818,7 +819,7 @@ def copy_worker(
             try:
                 for output_data in process_example(input_data):
                     yield output_data
-            except:
+            except Exception:
                 logger.error(traceback.format_exc())
 
         log_queue.put_nowait(processed_count % 1000)
@@ -827,25 +828,32 @@ def copy_worker(
     if shuffle_bufsize > 0:
         it = wds.filters._shuffle(it, shuffle_bufsize, shuffle_bufsize)
 
-    for d in it:
+    try:
+        for d in it:
+            try:
+                sw.write(d)
+            except Exception:
+                logger.error(traceback.format_exc())
+
         try:
-            sw.write(d)
-        except:
+            sw.close()
+        except Exception:
             logger.error(traceback.format_exc())
 
-    try:
-        sw.close()
-    except:
-        logger.error(traceback.format_exc())
+        if processed_count != total_data:
+            logger.error(f"expected {total_data} samples but found {processed_count}")
 
-    if processed_count != total_data:
-        logger.error(f"expected {total_data} samples but found {processed_count}")
+        with lock:
+            state.worker_success += 1
 
-    with lock:
-        state.processed_count += processed_count
-        state.output_count += output_count
-        state.blur_count += blur_count
-        state.worker_success += 1
+    except KeyboardInterrupt:
+        logger.error("Caught KeyboardInterrupt, exiting...")
+
+    finally:
+        with lock:
+            state.processed_count += processed_count
+            state.output_count += output_count
+            state.blur_count += blur_count
 
 
 def logging_handler(total_data, log_queue):
@@ -872,10 +880,7 @@ def logging_handler(total_data, log_queue):
             pass
 
         except:
-            from sys import stderr
-            from traceback import print_exc
-
-            print_exc(file=stderr)
+            traceback.print_exc(file=sys.stderr)
             raise
 
     bar.close()
@@ -901,7 +906,6 @@ def do_tasks(worker_tasks, args):
     logging_thread = threading.Thread(
         target=logging_handler, args=(total_data, log_queue)
     )
-    logging_thread.daemon = True
 
     processes = [
         mp.Process(target=copy_worker, args=(task, state, lock, log_queue), kwargs=args)
@@ -912,15 +916,23 @@ def do_tasks(worker_tasks, args):
     for p in processes:
         p.start()
 
-    for p in processes:
-        p.join()
+    try:
+        for p in processes:
+            p.join()
+
+    except KeyboardInterrupt:
+        # workers will also receive a KeyboardInterrupt
+        # so wait for them to terminate on their own
+        for p in processes:
+            p.join()
+
+    finally:
+        # send the sentinel value to the thread to tell it to exit
+        log_queue.put_nowait(None)
+        logging_thread.join()
 
     if state.worker_success != len(worker_tasks):
         logger.error(f"{len(worker_tasks) - state.worker_success} workers failed")
-
-    # send the sentinel value to the thread to tell it to exit
-    log_queue.put_nowait(None)
-    logging_thread.join()
 
     return state
 
