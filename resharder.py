@@ -429,6 +429,11 @@ def make_argparser():
         help="do not make any changes to the output directory",
     )
     parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="overwrite existing files in the output directory",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="append_const",
@@ -841,7 +846,7 @@ def copy_worker(
             state.worker_success += 1
 
     except KeyboardInterrupt:
-        logger.error("Caught KeyboardInterrupt, exiting...")
+        logger.fatal("Caught KeyboardInterrupt, exiting...")
 
     finally:
         with lock:
@@ -931,7 +936,14 @@ def do_tasks(worker_tasks, args):
     return state
 
 
-def rmtree_contents(path: Pathy):
+def rmtree_contents(path: Pathy, /, overwrite, **_):
+    if not overwrite and any(path.iterdir()):
+        logger.fatal(
+            "refusing to overwrite non-empty directory; "
+            "skip this check by passing --overwrite"
+        )
+        sys.exit(0)
+
     for path in path.iterdir():
         if path.is_file():
             path.unlink()
@@ -965,7 +977,7 @@ def main(args):
         args.num_workers = len(shards)
 
     logger.info("deleting files from output directory")
-    rmtree_contents(args.output_dir)
+    rmtree_contents(args.output_dir, **vars(args))
 
     if not args.dry_run:
         logger.info("copying the subset file to the output directory")
