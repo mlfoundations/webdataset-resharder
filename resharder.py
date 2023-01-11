@@ -554,6 +554,7 @@ def load_shard_metadata(
         if size is not None:
             table[shard_name] = size
 
+    missing_shards = 0
     for shard_id in shard_ids:
         shard_name = shard_format.format(shard_id)
 
@@ -562,7 +563,14 @@ def load_shard_metadata(
             shards.append(Shard(shard_id, offset, size))
             offset += size
         else:
-            logger.warning(f"missing shard {shard_name}")
+            logger.debug(f"missing shard {shard_name}")
+            missing_shards += 1
+
+    if missing_shards > 0:
+        logger.warning(
+            f"{missing_shards} shards were missing were missing; "
+            "set log level to DEBUG to see list"
+        )
 
     total_data = shards[-1].data_start + shards[-1].size
     logger.info(f"found a total of {len(shards)} shards with {total_data} examples")
@@ -611,11 +619,19 @@ def load_parquet_metadata(
             parquet_table[path_or_cloudpath(shard).name] = pq["parquet"]
 
     parquet_list = []
+    missing_parquets = 0
     for shard in shards:
         shard_name = shard_format.format(shard.shard_id)
         parquet_list.append(parquet_table.get(shard_name))
         if parquet_list[-1] is None:
-            logger.warning(f"could not find parquet for shard {shard_name}")
+            logger.debug(f"could not find parquet for shard {shard_name}")
+            missing_parquets += 1
+
+    if missing_parquets > 0:
+        logger.warning(
+            f"could not find parquets for {missing_parquets} shards; "
+            "set log level to DEBUG to see list"
+        )
 
     return parquet_list
 
