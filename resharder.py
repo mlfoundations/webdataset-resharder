@@ -402,12 +402,6 @@ def make_argparser():
         "--shuffle-bufsize", default=100000, type=int, help="buffer size for shuffling"
     )
     parser.add_argument(
-        "--is-master",
-        action="store_true",
-        default=True,
-        help="for multi-node processing, indicate whether the current script is the master",
-    )
-    parser.add_argument(
         "--blur-metadata-map",
         type=path_or_cloudpath,
         default=None,
@@ -973,7 +967,7 @@ def main(args):
     logger.info("deleting files from output directory")
     rmtree_contents(args.output_dir)
 
-    if args.is_master and not args.dry_run:
+    if not args.dry_run:
         logger.info("copying the subset file to the output directory")
         output_filename = args.output_dir / "sample_ids.npy"
         if isinstance(args.subset_file, CloudPath):
