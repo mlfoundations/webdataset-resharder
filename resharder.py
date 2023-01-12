@@ -984,6 +984,17 @@ def set_loglevel(logger, /, verbose, quiet, **_):
     logger.setLevel(log_levels[max(min(1 - verbose + quiet, len(log_levels)), 0)])
 
 
+def make_memory_tmpfile():
+    shm = Path("/dev/shm")
+
+    if shm.exists():
+        # file is about to be memory-mapped so using a tmpfs
+        # saves us a copy
+        return tempfile.NamedTemporaryFile("wb", dir=shm)
+
+    return tempfile.NamedTemporaryFile("wb")
+
+
 def main(args):
     set_loglevel(logger, **vars(args))
 
@@ -1016,7 +1027,7 @@ def main(args):
     else:
         parquets = None
 
-    with tempfile.NamedTemporaryFile("wb") as f:
+    with make_memory_tmpfile() as f:
         if isinstance(args.subset_file, CloudPath):
             logger.info("copying remote subset file to local machine")
             with args.subset_file.open("rb") as sf:
