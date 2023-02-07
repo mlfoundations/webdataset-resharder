@@ -25,10 +25,12 @@ from multiprocessing.managers import NamespaceProxy, AcquirerProxy
 
 import cv2
 import numpy as np
-import pandas as pd
 import simdjson
 import tqdm
 import webdataset as wds
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 from cloudpathlib import CloudPath
 from img2dataset.blurrer import BoundingBoxBlurrer
@@ -690,6 +692,27 @@ def blur_image(
     return encoded
 
 
+def load_blur_bboxes(f):
+    table = pq.read_table(f, columns=["uid", "face_bboxes"])
+    table = table.sort_by("uid")
+
+    uh = pc.cast(
+        pc.binary_join_element_wise(
+            "0x", pc.utf8_slice_codeunits(table[0], 0x00, 0x10), ""
+        ),
+        pa.uint64(),
+    ).to_numpy()
+
+    lh = pc.cast(
+        pc.binary_join_element_wise(
+            "0x", pc.utf8_slice_codeunits(table[0], 0x10, 0x20), ""
+        ),
+        pa.uint64(),
+    ).to_numpy()
+
+    return np.core.records.fromarrays([uh, lh]), table[1]
+
+
 def copy_worker(
     task: WorkerTask,
     state: NamespaceProxy,
@@ -738,18 +761,26 @@ def copy_worker(
         try:
             logger.debug(f"loading parquet {fname}")
             with path_or_cloudpath(fname).open("rb") as f:
-                return pd.read_parquet(f).set_index("uid")["face_bboxes"]
+                return load_blur_bboxes(f)
         except FileNotFoundError:
             return None
 
-    def load_blur_bboxes(url, uid):
+    def get_blur_bboxes_for_img(url, uid):
         fname = parquet_table.get(path_or_cloudpath(url).name)
         if fname is not None:
-            parquets = load_parquet(fname)
-            if parquets is None:
+            parquet = load_parquet(fname)
+            if parquet is None:
                 logger.error(f"failed to find parquet for {url}")
-            if parquets is not None:
-                return parquets.get(uid)
+
+            uids, bboxes = parquet
+            i = np.searchsorted(uids, uid)
+            if uids[i] != uid:
+                logger.error(
+                    f"{task.worker_id:04d} failed to find blur bboxes for {url}, {uid[0]:016x}{uid[1]:016x}"
+                )
+                return
+
+            return bboxes[i].as_py()
 
     output_shard_index = None
 
@@ -798,13 +829,8 @@ def copy_worker(
             count = b - a
 
             if task.parquets and count > 0:
-                blur_bboxes = load_blur_bboxes(d["__url__"], key_str)
-                if blur_bboxes is None:
-                    logger.error(
-                        f"{task.worker_id:04d} failed to find blur bboxes for {d['__url__']}, {key_str}"
-                    )
-
-                elif len(blur_bboxes) > 0:
+                blur_bboxes = get_blur_bboxes_for_img(d["__url__"], key_u16)
+                if blur_bboxes is not None and len(blur_bboxes) > 0:
                     if apply_blur:
                         blur_start_time = time.perf_counter()
                         d["webp"] = blur_image(
