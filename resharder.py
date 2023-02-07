@@ -780,14 +780,14 @@ def copy_worker(
         task.shards[-1].data_start + task.shards[-1].size - task.shards[0].data_start
     )
 
-    processed_count, output_count, blur_count = 0, 0, 0
+    processed_count, output_count, blur_count, blur_time = 0, 0, 0, 0
 
     def subset_iter():
         parser = simdjson.Parser()
         blurrer = BoundingBoxBlurrer()
 
         def process_example(d):
-            nonlocal processed_count, output_count, blur_count
+            nonlocal processed_count, output_count, blur_count, blur_time
             json_parsed = parser.parse(d["json"])
             key_str = json_parsed.get("uid")
             # TODO: is this really the best way to get a u16 scalar?
@@ -806,11 +806,13 @@ def copy_worker(
 
                 elif len(blur_bboxes) > 0:
                     if apply_blur:
+                        blur_start_time = time.perf_counter()
                         d["webp"] = blur_image(
                             blurrer, d["jpg"], blur_bboxes, reencode_webp_quality
                         )
                         del d["jpg"]  # Remove jpg version of image
                         blur_count += 1
+                        blur_time += time.perf_counter() - blur_start_time
 
                     if inject_blur_metadata:
                         json = json_parsed.as_dict()
@@ -869,6 +871,7 @@ def copy_worker(
             state.processed_count += processed_count
             state.output_count += output_count
             state.blur_count += blur_count
+            state.blur_time += blur_time
 
 
 def logging_handler(total_data, log_queue):
@@ -908,6 +911,7 @@ def do_tasks(worker_tasks, args):
     state.processed_count = 0
     state.output_count = 0
     state.blur_count = 0
+    state.blur_time = 0
     state.output_shard_count = 0
     state.worker_success = 0
 
@@ -1062,6 +1066,10 @@ def main(args):
 
         if state.blur_count > 0:
             logger.info(f"applied blur to {state.blur_count} images")
+            blur_percent = state.blur_time / (args.num_workers * elapsed_time) * 100
+            logger.info(
+                f"spent {state.blur_time:.3f} worker seconds ({blur_percent:0.1f}% of total) blurring images"
+            )
 
         if not args.dry_run:
             with (args.output_dir / "meta.json").open("w") as f:
