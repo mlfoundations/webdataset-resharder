@@ -695,17 +695,18 @@ def blur_image(
 def load_blur_bboxes(f):
     table = pq.read_table(f, columns=["uid", "face_bboxes"])
     table = table.sort_by("uid")
+    uids = pc.ascii_lpad(table[0], 0x20, "0")
 
     uh = pc.cast(
         pc.binary_join_element_wise(
-            "0x", pc.utf8_slice_codeunits(table[0], 0x00, 0x10), ""
+            "0x", pc.utf8_slice_codeunits(uids, 0x00, 0x10), ""
         ),
         pa.uint64(),
     ).to_numpy()
 
     lh = pc.cast(
         pc.binary_join_element_wise(
-            "0x", pc.utf8_slice_codeunits(table[0], 0x10, 0x20), ""
+            "0x", pc.utf8_slice_codeunits(uids, 0x10, 0x20), ""
         ),
         pa.uint64(),
     ).to_numpy()
@@ -776,7 +777,7 @@ def copy_worker(
             i = np.searchsorted(uids, uid)
             if uids[i] != uid:
                 logger.error(
-                    f"{task.worker_id:04d} failed to find blur bboxes for {url}, {uid[0]:016x}{uid[1]:016x}"
+                    f"failed to find blur bboxes for {url}, {uid[0]:016x}{uid[1]:016x}"
                 )
                 return
 
