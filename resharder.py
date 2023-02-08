@@ -311,7 +311,7 @@ def ceildiv(a, b):
 
 def path_or_cloudpath(s: str) -> Pathy:
     if re.match(r"^\w+://", s):
-        return CloudPath(s)
+        return CloudPath(s.rstrip("/"))
     return Path(s)
 
 
@@ -605,6 +605,7 @@ def load_parquet_metadata(
     /,
     blur_metadata_map: Optional[Pathy] = parser.get_default("blur_metadata_map"),
     shard_format: str = parser.get_default("shard_format"),
+    input_dir: Optional[Pathy] = None,
     **_,
 ):
     if blur_metadata_map is None:
@@ -618,7 +619,10 @@ def load_parquet_metadata(
     # invert the parquet → shard multi-map
     for pq in parquets.values():
         for shard in pq["shards"]:
-            parquet_table[path_or_cloudpath(shard).name] = pq["parquet"]
+            shard_path = path_or_cloudpath(shard)
+            if input_dir is not None and shard_path.parent != input_dir:
+                continue
+            parquet_table[shard_path.name] = pq["parquet"]
 
     parquet_list = []
     missing_parquets = 0
