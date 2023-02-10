@@ -1021,13 +1021,11 @@ def set_loglevel(logger, /, verbose, quiet, **_):
 
 def make_memory_tmpfile():
     shm = Path("/dev/shm")
-
-    if shm.exists():
-        # file is about to be memory-mapped so using a tmpfs
-        # saves us a copy
-        return tempfile.NamedTemporaryFile("wb", dir=shm)
-
-    return tempfile.NamedTemporaryFile("wb")
+    # file is about to be memory-mapped so using a tmpfs
+    # saves us a copy if it is not local to begin with
+    return tempfile.NamedTemporaryFile(
+        "w+b", prefix="resharder-", **({"dir": shm} if shm.exists() else {})
+    )
 
 
 def main(args):
@@ -1040,14 +1038,6 @@ def main(args):
 
     logger.info("deleting files from output directory")
     rmtree_contents(args.output_dir, **vars(args))
-
-    if not args.dry_run:
-        logger.info("copying the subset file to the output directory")
-        output_filename = args.output_dir / "sample_ids.npy"
-        if isinstance(args.subset_file, CloudPath):
-            args.subset_file.copy(output_filename)
-        else:
-            shutil.copyfile(args.subset_file, output_filename)
 
     if args.apply_blur and not args.blur_metadata_map:
         logger.fatal("need to pass --blur-metadata-map to use --apply-blur")
@@ -1064,10 +1054,20 @@ def main(args):
 
     with make_memory_tmpfile() as f:
         if isinstance(args.subset_file, CloudPath):
-            logger.info("copying remote subset file to local machine")
             with args.subset_file.open("rb") as sf:
-                f.write(sf.read())
+                logger.info("copying remote subset file to local machine")
+                shutil.copyfileobj(sf, f)
+                f.seek(0)
+
             args.subset_file = Path(f.name)
+
+        if not args.dry_run:
+            with args.subset_file.open("rb") as sf:
+                logger.info("copying the subset file to the output directory")
+                output_filename = args.output_dir / "sample_ids.npy"
+
+                with output_filename.open("wb") as of:
+                    shutil.copyfileobj(sf, of)
 
         subset = load_subset(**vars(args))
         logger.info(f"selecting a subset of {len(subset)} examples")
