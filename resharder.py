@@ -822,9 +822,18 @@ def copy_worker(
         parser = simdjson.Parser()
         blurrer = BoundingBoxBlurrer()
 
+        def parse_json_safe(s):
+            nonlocal parser
+            try:
+                return parser.parse(s)
+            except RuntimeError:
+                # throw away the old parser
+                parser = simdjson.Parser()
+                return parser.parse(s)
+
         def process_example(d):
             nonlocal processed_count, output_count, blur_count, blur_time
-            json_parsed = parser.parse(d["json"])
+            json_parsed = parse_json_safe(d["json"])
             key_str = json_parsed.get("uid")
             # TODO: is this really the best way to get a u16 scalar?
             key_u16 = np.array([divmod(int(key_str, 16), 2**64)], u16)[0]
