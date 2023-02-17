@@ -603,25 +603,25 @@ def load_shard_metadata(
 
     shard_ids = range(first_shard, first_shard + num_shards)
 
-    pool = mp.Pool(num_workers)
-    size_iter = pool.imap(
-        load_shard_size,
-        (
+    with mp.Pool(num_workers) as pool:
+        size_iter = pool.imap(
+            load_shard_size,
             (
-                shard_id,
-                input_dir,
-                shard_format,
-                shard_stats_format,
-            )
-            for shard_id in tqdm.tqdm(shard_ids, dynamic_ncols=True)
-            if shard_format.format(shard_id) not in table
-        ),
-        chunksize=16,
-    )
+                (
+                    shard_id,
+                    input_dir,
+                    shard_format,
+                    shard_stats_format,
+                )
+                for shard_id in tqdm.tqdm(shard_ids, dynamic_ncols=True)
+                if shard_format.format(shard_id) not in table
+            ),
+            chunksize=16,
+        )
 
-    for shard_name, size in size_iter:
-        if size is not None:
-            table[shard_name] = size
+        for shard_name, size in size_iter:
+            if size is not None:
+                table[shard_name] = size
 
     missing_shards = 0
     for shard_id in shard_ids:
@@ -1090,8 +1090,8 @@ def rmtree_contents(path: Pathy, /, overwrite, num_workers, **_):
             path.unlink()
 
     if files_exist:
-        pool = mp.Pool(num_workers)
-        pool.imap(remove_file, path.iterdir(), chunksize=16)
+        with mp.Pool(num_workers) as pool:
+            pool.imap(remove_file, path.iterdir(), chunksize=16)
 
 
 def postprocess_output(*, output_dir, shard_format, **_):
