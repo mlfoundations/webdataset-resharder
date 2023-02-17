@@ -146,12 +146,17 @@ class ResharderPipe(Pipe):
             stderr = self.proc.stderr.read().decode()
             # Don't pass KeyboardInterrupt through
             if stderr and not stderr.endswith("\nKeyboardInterrupt\n"):
-                logger.error(f"captured error from aws-cli: {stderr}")
+                msg = stderr.rstrip("\n")
+                logger.error(f"ResharderPipe captured error: {msg}")
 
         if self.status not in self.ignore_status and not self.ignore_errors:
-            raise Exception(
-                f"{self.args}: exit {self.status} (read) {wds.writer.gopen.info}"
+            logger.error(
+                f"ResharderPipe {self.args}: exit {self.status} (read) {wds.writer.gopen.info}"
             )
+
+    def __del__(self):
+        self.stream.close()
+        self.proc.wait(self.timeout)
 
 
 def gopen_aws(url, mode="rb", bufsize=8192):
