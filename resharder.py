@@ -1058,17 +1058,22 @@ def do_tasks(worker_tasks, args):
     return state
 
 
-def rmtree_contents(path: Pathy, /, overwrite, **_):
-    if not overwrite and any(path.iterdir()):
+def rmtree_contents(path: Pathy, /, overwrite, num_workers, **_):
+    files_exist = any(path.iterdir())
+    if not overwrite and files_exist:
         logger.fatal(
             "refusing to overwrite non-empty directory; "
             "skip this check by passing --overwrite"
         )
-        sys.exit(0)
+        sys.exit(1)
 
-    for path in path.iterdir():
+    def remove_file(path):
         if path.is_file():
             path.unlink()
+
+    if files_exist:
+        pool = mp.Pool(num_workers)
+        pool.imap(remove_file, path.iterdir(), chunksize=16)
 
 
 def postprocess_output(*, output_dir, shard_format, **_):
