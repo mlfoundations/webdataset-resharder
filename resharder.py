@@ -310,19 +310,29 @@ def group_by_keys_nothrow(
             continue
         if lcase:
             suffix = suffix.lower()
-        # FIXME webdataset version throws if suffix in current_sample, but we have a potential for
-        #  this happening in the current LAION400m dataset if a tar ends with same prefix as the next
-        #  begins, rare, but can happen since prefix aren't unique across tar files in that dataset
-        if (
-            current_sample is None
-            or prefix != current_sample["__key__"]
-            or suffix in current_sample
-        ):
+
+        if current_sample is None or prefix != current_sample["__key__"]:
             if valid_sample(current_sample):
                 yield current_sample
             current_sample = dict(__key__=prefix, __url__=filesample["__url__"])
+
+        # FIXME webdataset version throws if suffix in current_sample, but we have a potential for
+        #  this happening in the current LAION400m dataset if a tar ends with same prefix as the next
+        #  begins, rare, but can happen since prefix aren't unique across tar files in that dataset
+        if suffix in current_sample:
+            if handler is not None:
+                handler(
+                    ValueError(
+                        f"{fname}: duplicate file name in tar file {suffix} {set(current_sample.keys())}"
+                    )
+                )
+            if valid_sample(current_sample):
+                yield current_sample
+            current_sample = dict(__key__=prefix, __url__=filesample["__url__"])
+
         if suffixes is None or suffix in suffixes:
             current_sample[suffix] = value
+
     if valid_sample(current_sample):
         yield current_sample
 
@@ -627,7 +637,7 @@ def load_shard_metadata(
 
     if missing_shards > 0:
         logger.warning(
-            f"{missing_shards} shards were missing were missing; "
+            f"{missing_shards} shards were missing; "
             "set log level to DEBUG to see list"
         )
 
@@ -889,12 +899,20 @@ def copy_worker(
             try:
                 return parser.parse(s)
             except RuntimeError:
+                logger.warning("discarding parser due to dangling reference")
                 # throw away the old parser
                 parser = simdjson.Parser()
                 return parser.parse(s)
 
         def process_example(d):
             nonlocal processed_count, output_count, blur_count, blur_time
+
+            if "json" not in d:
+                logger.error(
+                    f"missing json for {d['__url__']}/{d['__key__']}, skipping"
+                )
+                return
+
             json_parsed = parse_json_safe(d["json"])
             key_str = json_parsed.get("uid")
             # TODO: is this really the best way to get a u16 scalar?
@@ -1123,8 +1141,8 @@ def main(args):
 
     # If blur is needed, retrieve json with metadata parquet locations.
     if args.blur_metadata_map is not None:
+        logger.info("loading parquet metadata")
         parquets = load_parquet_metadata(shards, **vars(args))
-        logger.info("loading parquet files")
     else:
         parquets = None
 
