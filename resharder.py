@@ -17,11 +17,12 @@ import threading
 import time
 import traceback
 
+from cloudpathlib.enums import FileCacheMode
 from dataclasses import dataclass
 from functools import lru_cache
+from multiprocessing.managers import NamespaceProxy, AcquirerProxy
 from pathlib import Path
 from typing import List, Optional, Callable, Union, Dict
-from multiprocessing.managers import NamespaceProxy, AcquirerProxy
 
 import cv2
 import numpy as np
@@ -41,6 +42,8 @@ from webdataset.tariterators import (
     valid_sample,
 )
 
+# we always read and write files exactly once so we can use the strictest caching policy
+os.environ["CLOUPATHLIB_FILE_CACHE_MODE"] = FileCacheMode.close_file.name
 
 Pipe = wds.writer.gopen.Pipe
 Pathy = Union[Path, CloudPath]
